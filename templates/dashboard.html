@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Big Data Dashboard</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+</head>
+<body class="bg-light">
+
+  <!-- Navbar -->
+  <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+    <div class="container-fluid">
+      <a class="navbar-brand" href="#">Big Data Dashboard</a>
+      <div class="d-flex">
+        <span class="navbar-text text-white me-3">Logged in as {{ user }}</span>
+        <a class="btn btn-outline-light" href="{{ url_for('logout') }}">Logout</a>
+      </div>
+    </div>
+  </nav>
+
+  <div class="container mt-4">
+
+    <!-- Upload Form -->
+    <h2 class="mb-4">Upload a CSV</h2>
+    <form method="POST" action="{{ url_for('upload') }}" enctype="multipart/form-data" class="mb-4">
+      <div class="row g-3 align-items-center">
+        <div class="col-auto">
+          <input type="file" name="csv_file" class="form-control" required>
+        </div>
+        <div class="col-auto">
+          <button type="submit" class="btn btn-primary">Upload</button>
+        </div>
+      </div>
+    </form>
+
+    <!-- Flash Messages -->
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        <div class="alert alert-warning mt-3">
+          {{ messages[0] }}
+        </div>
+      {% endif %}
+    {% endwith %}
+
+    <!-- CSV Preview -->
+    {% if table %}
+      <div class="accordion mt-4" id="previewAccordion">
+        <div class="accordion-item">
+          <h2 class="accordion-header" id="previewHeading">
+            <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#collapsePreview">
+              Preview of Uploaded CSV
+            </button>
+          </h2>
+          <div id="collapsePreview" class="accordion-collapse collapse">
+            <div class="accordion-body table-responsive">
+              {{ table|safe }}
+            </div>
+          </div>
+        </div>
+      </div>
+    {% endif %}
+
+    <!-- Smart Insights -->
+    {% if summary %}
+      <div class="accordion mt-5" id="insightAccordion">
+        <div class="accordion-item">
+          <h2 class="accordion-header" id="insightHeading">
+            <button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#collapseInsights">
+              Smart Insights
+            </button>
+          </h2>
+          <div id="collapseInsights" class="accordion-collapse collapse show">
+            <div class="accordion-body">
+              <ul class="list-group">
+                {% for col, insight in summary.items() %}
+                  <li class="list-group-item"><strong>{{ col }}</strong>: {{ insight }}</li>
+                {% endfor %}
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    {% endif %}
+
+    <!-- Chart Suggestions -->
+    {% if suggestions %}
+      <div class="accordion mt-5" id="suggestAccordion">
+        <div class="accordion-item">
+          <h2 class="accordion-header" id="suggestionsHeading">
+            <button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#collapseSuggestions">
+              Chart Suggestions (Ranked by Strength)
+            </button>
+          </h2>
+          <div id="collapseSuggestions" class="accordion-collapse collapse show">
+            <div class="accordion-body">
+              <ul class="list-group">
+                {% for suggestion in suggestions|sort(attribute='score', reverse=True) %}
+                  {% if suggestion.chart_type and suggestion.x %}
+                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                      <div>
+                        <strong>{{ suggestion.title }}</strong>
+                        {% if suggestion.score %}
+                          <span class="text-muted small">({{ '%.2f'|format(suggestion.score) }})</span>
+                        {% endif %}
+                      </div>
+                      <form method="POST" action="{{ url_for('visualize') }}">
+                        <input type="hidden" name="filename" value="{{ selected_file }}">
+                        <input type="hidden" name="x_column" value="{{ suggestion.x }}">
+                        {% if suggestion.y %}
+                          <input type="hidden" name="y_column" value="{{ suggestion.y }}">
+                        {% endif %}
+                        <input type="hidden" name="chart_type" value="{{ suggestion.chart_type }}">
+                        <button type="submit" class="btn btn-sm btn-outline-primary">Generate Chart</button>
+                      </form>
+                    </li>
+                  {% endif %}
+                {% endfor %}
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    {% endif %}
+
+    <!-- Manual Chart Creator -->
+    {% if columns and columns|length > 1 %}
+      <div class="accordion mt-4" id="chartAccordion">
+        <div class="accordion-item">
+          <h2 class="accordion-header" id="chartHeading">
+            <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#collapseChart">
+              Create a Custom Chart
+            </button>
+          </h2>
+          <div id="collapseChart" class="accordion-collapse collapse">
+            <div class="accordion-body">
+              <form method="POST" action="{{ url_for('visualize') }}">
+                <input type="hidden" name="filename" value="{{ selected_file or uploads[-1].filename }}">
+                <div class="row mb-3">
+                  <div class="col-md-4">
+                    <label for="x_column" class="form-label">X Axis:</label>
+                    <select name="x_column" class="form-select" required>
+                      {% for col in columns %}
+                        <option value="{{ col }}">{{ col }}</option>
+                      {% endfor %}
+                    </select>
+                  </div>
+                  <div class="col-md-4">
+                    <label for="y_column" class="form-label">Y Axis:</label>
+                    <select name="y_column" class="form-select" required>
+                      {% for col in columns %}
+                        <option value="{{ col }}">{{ col }}</option>
+                      {% endfor %}
+                    </select>
+                  </div>
+                  <div class="col-md-4">
+                    <label for="chart_type" class="form-label">Chart Type:</label>
+                    <select name="chart_type" class="form-select" required>
+                      <option value="bar">Bar</option>
+                      <option value="line">Line</option>
+                      <option value="scatter">Scatter</option>
+                      <option value="pie">Pie</option>
+                      <option value="scatter_map">Map (Scatter)</option>
+                      <option value="density_map">Map (Heatmap)</option>
+                    </select>
+                  </div>
+                </div>
+                <button type="submit" class="btn btn-success">Generate Chart</button>
+              </form>
+            </div>
+          </div>
+        </div>
+      </div>
+    {% endif %}
+
+    <!-- Uploaded Files -->
+    <div class="mt-5">
+      <h4>Uploaded Files</h4>
+      {% if uploads %}
+        <ul class="list-group mb-4" id="fileList">
+          {% for upload in uploads %}
+            {% set is_selected = upload.filename.strip() == (selected_file or '').strip() %}
+            {% set filepath = 'uploads/' ~ upload.filename %}
+            {% if filepath|file_exists %}
+              <li class="list-group-item d-flex justify-content-between align-items-center file-item {% if is_selected %}list-group-item-info{% endif %}" data-filename="{{ upload.filename }}" role="button">
+                <div>
+                  <span class="fw-semibold">{{ upload.filename }}</span>
+                  <small class="text-muted d-block">Uploaded {{ upload.timestamp.strftime('%b %d, %Y at %I:%M %p') }}</small>
+                </div>
+                <form method="POST" action="{{ url_for('delete_file') }}" class="mb-0">
+                  <input type="hidden" name="filename" value="{{ upload.filename }}">
+                  <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
+                </form>
+              </li>
+            {% endif %}
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p>No uploads yet.</p>
+      {% endif %}
+
+      {% if chart %}
+        {{ chart|safe }}
+      {% endif %}
+    </div>
+  </div>
+
+  <script>
+    document.addEventListener("DOMContentLoaded", function () {
+      const fileList = document.getElementById("fileList");
+      let selected = document.querySelector(".file-item.list-group-item-info");
+      if (fileList) {
+        fileList.addEventListener("click", (e) => {
+          const item = e.target.closest(".file-item");
+          if (!item) return;
+          const isSelected = item.classList.contains("list-group-item-info");
+          if (!isSelected) {
+            if (selected) selected.classList.remove("list-group-item-info");
+            item.classList.add("list-group-item-info");
+            selected = item;
+            const fname = item.getAttribute("data-filename");
+            if (fname) window.location.href = `/dashboard?filename=${encodeURIComponent(fname)}`;
+          }
+        });
+      }
+    });
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
