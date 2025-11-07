@@ -37,9 +37,11 @@
     <!-- Flash Messages -->
     {% with messages = get_flashed_messages() %}
       {% if messages %}
-        <div class="alert alert-warning mt-3">
-          {{ messages[0] }}
-        </div>
+        {% for message in messages %}
+          <div class="alert alert-warning mt-3" role="alert">
+            {{ message }}
+          </div>
+        {% endfor %}
       {% endif %}
     {% endwith %}
 
@@ -135,7 +137,7 @@
           <div id="collapseChart" class="accordion-collapse collapse">
             <div class="accordion-body">
               <form method="POST" action="{{ url_for('visualize') }}">
-                <input type="hidden" name="filename" value="{{ selected_file or uploads[-1].filename }}">
+                <input type="hidden" name="filename" value="{{ selected_file or (uploads[0].filename if uploads) }}">
                 <div class="row mb-3">
                   <div class="col-md-4">
                     <label for="x_column" class="form-label">X Axis:</label>
@@ -179,12 +181,11 @@
       {% if uploads %}
         <ul class="list-group mb-4" id="fileList">
           {% for upload in uploads %}
-            {% set is_selected = upload.filename.strip() == (selected_file or '').strip() %}
-            {% set filepath = 'uploads/' ~ upload.filename %}
-            {% if filepath|file_exists %}
+            {% set is_selected = upload.filename == (selected_file or '') %}
+            {% if upload.filename|file_exists %}
               <li class="list-group-item d-flex justify-content-between align-items-center file-item {% if is_selected %}list-group-item-info{% endif %}" data-filename="{{ upload.filename }}" role="button">
                 <div>
-                  <span class="fw-semibold">{{ upload.filename }}</span>
+                  <span class="fw-semibold">{{ upload.original_filename }}</span>
                   <small class="text-muted d-block">Uploaded {{ upload.timestamp.strftime('%b %d, %Y at %I:%M %p') }}</small>
                 </div>
                 <form method="POST" action="{{ url_for('delete_file') }}" class="mb-0">
