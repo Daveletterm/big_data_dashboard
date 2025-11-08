@@ -57,7 +57,7 @@ def _coerce_datetime_columns(df: pd.DataFrame) -> pd.DataFrame:
     for column in string_like.columns:
         lowered = column.lower()
         if any(hint in lowered for hint in datetime_hints):
-            parsed = pd.to_datetime(df[column], errors='coerce', infer_datetime_format=True)
+            parsed = pd.to_datetime(df[column], errors='coerce')
             if not parsed.isna().all():
                 df[column] = parsed
 
@@ -126,7 +126,11 @@ def generate_chart_suggestions(df, max_suggestions=10):
 
     numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
     categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
-    datetime_cols = df.select_dtypes(include=['datetime64']).columns.tolist()
+    datetime_cols = [
+        column
+        for column in df.columns
+        if pd.api.types.is_datetime64_any_dtype(df[column])
+    ]
 
     # 1. Time trends: look for columns that change steadily over time
     for tcol in datetime_cols:
@@ -139,7 +143,7 @@ def generate_chart_suggestions(df, max_suggestions=10):
             values = non_missing[num].values
             if len(values) > 1:
                 corr_time = pd.Series(range(len(values))).corr(pd.Series(values))
-                score = abs(corr_time)
+                score = float(abs(corr_time))
                 if score > 0.3:  # modest trend threshold
                     suggestions.append({
                         "title": f"Trend of {num} over {tcol} (trend strength {score:.2f})",
@@ -173,7 +177,7 @@ def generate_chart_suggestions(df, max_suggestions=10):
         if unique_count <= 8:
             # pie charts for small, diverse categories
             counts = df[cat].value_counts(normalize=True)
-            balance = 1 - abs(counts.max() - counts.mean())  # penalize dominance
+            balance = float(1 - abs(counts.max() - counts.mean()))  # penalize dominance
             if balance > 0.4:
                 suggestions.append({
                     "title": f"Distribution of {cat}",
@@ -198,7 +202,7 @@ def generate_chart_suggestions(df, max_suggestions=10):
                     "chart_type": "scatter",
                     "x": c1,
                     "y": c2,
-                    "score": abs(corr) + 1.2  # rank strong correlations highest
+                    "score": float(abs(corr) + 1.2)  # rank strong correlations highest
                 })
 
     # Rank and trim
@@ -317,6 +321,8 @@ def dashboard():
         else:
             flash('Selected file not found on disk')
 
+    suggestions = suggestions or []
+
     return render_template(
         'dashboard.html',
         user=session['user'],
@@ -376,6 +382,8 @@ def upload():
         .order_by(Upload.timestamp.desc())
         .all()
     )
+
+    suggestions = suggestions or []
 
     return render_template(
         'dashboard.html',
