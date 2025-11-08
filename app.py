@@ -64,36 +64,12 @@ def _coerce_datetime_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _coerce_numeric_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Convert obviously numeric string columns into numeric dtype."""
-
-    # Only inspect textual columns – the rest already carry an explicit dtype.
-    for column in df.select_dtypes(include=['object', 'string']).columns:
-        series = df[column]
-
-        # Normalise thousands separators or currency markers before conversion.
-        cleaned = (
-            series.astype(str)
-            .str.strip()
-            .str.replace(r'[,$]', '', regex=True)
-        )
-
-        converted = pd.to_numeric(cleaned, errors='coerce')
-
-        # Keep the conversion only if it yields at least one real value.
-        if converted.notna().any():
-            df[column] = converted
-
-    return df
-
-
 def _load_dataframe(csv_path: Path) -> pd.DataFrame:
     """Load a CSV file into a cleaned dataframe."""
 
     df = pd.read_csv(csv_path)
     df.columns = df.columns.str.strip()
     df = _coerce_datetime_columns(df)
-    df = _coerce_numeric_columns(df)
     return df
 
 
