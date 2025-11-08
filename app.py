@@ -207,8 +207,12 @@ def generate_chart_suggestions(df, max_suggestions=10):
 
     # Rank and trim
     if not suggestions:
+        fallback_message = (
+            "No strong chart suggestions found. Try exploring columns manually "
+            "or adjust thresholds."
+        )
         return [{
-            "title": "No strong chart suggestions found. Try exploring columns manually.",
+            "title": fallback_message,
             "chart_type": None,
             "x": None,
             "y": None,
