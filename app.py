@@ -1,11 +1,15 @@
 from flask import Flask, render_template, request, redirect, url_for, session, flash
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
 from flask_sqlalchemy import SQLAlchemy
 from dotenv import load_dotenv
+from pathlib import Path
 import os
+import uuid
+from datetime import datetime
+
 import pandas as pd
 import plotly.express as px
-from datetime import datetime
 import plotly.io as pio
 pio.renderers.default = 'iframe'
 px.set_mapbox_access_token('pk.eyJ1IjoiZGF2ZWxldHRlcm0iLCJhIjoiY21kZmZrcWR3MGQ2MDJpcTNwejFkb2d5byJ9.hNgFSC79KzFzyBrgMBLKbA')
@@ -13,25 +17,144 @@ px.set_mapbox_access_token('pk.eyJ1IjoiZGF2ZWxldHRlcm0iLCJhIjoiY21kZmZrcWR3MGQ2M
 # Load .env file if available
 load_dotenv()
 
-app = Flask(__name__)
-app.secret_key = os.urandom(24)
+BASE_DIR = Path(__file__).resolve().parent
 
-# PostgreSQL database config from .env
-app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
+app = Flask(__name__)
+app.secret_key = os.getenv('SECRET_KEY', os.urandom(24))
+app.config['UPLOAD_FOLDER'] = BASE_DIR / 'uploads'
+app.config['UPLOAD_FOLDER'].mkdir(parents=True, exist_ok=True)
+app.config.setdefault('MAX_CONTENT_LENGTH', 25 * 1024 * 1024)
+
+# Database configuration with PostgreSQL preference and SQLite fallback
+def _determine_database_uri():
+    """Return the preferred database URI, falling back to SQLite if needed."""
+    database_url = os.getenv('DATABASE_URL')
+
+    if database_url:
+        # SQLAlchemy expects the ``postgresql`` scheme. Some providers still
+        # supply ``postgres`` so we normalise it here to avoid runtime errors.
+        if database_url.startswith("postgres://"):
+            database_url = database_url.replace("postgres://", "postgresql://", 1)
+
+        return database_url
+
+    sqlite_path = BASE_DIR / 'app.db'
+    return f"sqlite:///{sqlite_path}"
+
+
+app.config['SQLALCHEMY_DATABASE_URI'] = _determine_database_uri()
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
 
-def generate_chart_suggestions(df, max_suggestions=10):
-    import numpy as np
-    import pandas as pd
 
+def _coerce_datetime_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Coerce obvious datetime columns into datetime64."""
+
+    datetime_hints = ('date', 'time', 'timestamp')
+    string_like = df.select_dtypes(include=['object', 'string'])
+
+    for column in string_like.columns:
+        lowered = column.lower()
+        if any(hint in lowered for hint in datetime_hints):
+            parsed = pd.to_datetime(df[column], errors='coerce')
+            if not parsed.isna().all():
+                df[column] = parsed
+
+    return df
+
+
+def _coerce_numeric_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert obviously numeric string columns into numeric dtype."""
+
+    # Only inspect textual columns – the rest already carry an explicit dtype.
+    for column in df.select_dtypes(include=['object', 'string']).columns:
+        series = df[column]
+
+        # Normalise thousands separators or currency markers before conversion.
+        cleaned = (
+            series.astype(str)
+            .str.strip()
+            .str.replace(r'[,$]', '', regex=True)
+        )
+
+        converted = pd.to_numeric(cleaned, errors='coerce')
+
+        # Keep the conversion only if it yields at least one real value.
+        if converted.notna().any():
+            df[column] = converted
+
+    return df
+
+
+def _load_dataframe(csv_path: Path) -> pd.DataFrame:
+    """Load a CSV file into a cleaned dataframe."""
+
+    df = pd.read_csv(csv_path)
+    df.columns = df.columns.str.strip()
+    df = _coerce_datetime_columns(df)
+    df = _coerce_numeric_columns(df)
+    return df
+
+
+def _summarise_dataframe(df: pd.DataFrame) -> dict[str, str]:
+    """Generate human-readable insights for each column."""
+
+    summary: dict[str, str] = {}
+
+    for column in df.columns:
+        col_data = df[column]
+
+        if pd.api.types.is_numeric_dtype(col_data):
+            non_missing = col_data.dropna()
+            if non_missing.empty:
+                summary[column] = "No numeric data available"
+            else:
+                summary[column] = (
+                    f"Mean: {non_missing.mean():.2f}, "
+                    f"Median: {non_missing.median():.2f}, "
+                    f"Min: {non_missing.min()}, "
+                    f"Max: {non_missing.max()}"
+                )
+        elif col_data.dtype == 'object' or col_data.dtype.name == 'category':
+            non_missing = col_data.dropna()
+            if non_missing.empty:
+                summary[column] = "No values available"
+            else:
+                value_counts = non_missing.value_counts()
+                top_value = value_counts.idxmax()
+                top_count = value_counts.max()
+                summary[column] = f"Most common: {top_value} ({top_count} times)"
+        else:
+            summary[column] = "No insight available"
+
+    missing_data = df.isnull().sum()
+    for column, count in missing_data.items():
+        if count > 0:
+            existing = summary.get(column, "")
+            missing_message = f"Missing: {count}"
+            summary[column] = f"{existing} | {missing_message}".strip(" |")
+
+    return summary
+
+
+def _render_preview_table(df: pd.DataFrame) -> tuple[str, list[str]]:
+    preview_df = df.head(100)
+    table_html = preview_df.to_html(classes='table table-striped table-bordered', index=False)
+    columns = df.columns.tolist()
+    return table_html, columns
+
+def generate_chart_suggestions(df, max_suggestions=10):
     suggestions = []
     df = df.dropna(axis=1, how='all')
 
     numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
     categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
-    datetime_cols = df.select_dtypes(include=['datetime64']).columns.tolist()
+    datetime_cols = [
+        column
+        for column in df.columns
+        if pd.api.types.is_datetime64_any_dtype(df[column])
+    ]
 
     # 1. Time trends: look for columns that change steadily over time
     for tcol in datetime_cols:
@@ -44,7 +167,7 @@ def generate_chart_suggestions(df, max_suggestions=10):
             values = non_missing[num].values
             if len(values) > 1:
                 corr_time = pd.Series(range(len(values))).corr(pd.Series(values))
-                score = abs(corr_time)
+                score = float(abs(corr_time))
                 if score > 0.3:  # modest trend threshold
                     suggestions.append({
                         "title": f"Trend of {num} over {tcol} (trend strength {score:.2f})",
@@ -78,7 +201,7 @@ def generate_chart_suggestions(df, max_suggestions=10):
         if unique_count <= 8:
             # pie charts for small, diverse categories
             counts = df[cat].value_counts(normalize=True)
-            balance = 1 - abs(counts.max() - counts.mean())  # penalize dominance
+            balance = float(1 - abs(counts.max() - counts.mean()))  # penalize dominance
             if balance > 0.4:
                 suggestions.append({
                     "title": f"Distribution of {cat}",
@@ -103,7 +226,7 @@ def generate_chart_suggestions(df, max_suggestions=10):
                     "chart_type": "scatter",
                     "x": c1,
                     "y": c2,
-                    "score": abs(corr) + 1.2  # rank strong correlations highest
+                    "score": float(abs(corr) + 1.2)  # rank strong correlations highest
                 })
 
     # Rank and trim
@@ -127,9 +250,19 @@ class User(db.Model):
 
 class Upload(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    filename = db.Column(db.String(300), nullable=False)
-    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+    filename = db.Column(db.String(300), nullable=False, unique=True)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+
+    @property
+    def original_filename(self) -> str:
+        if '__' in self.filename:
+            return self.filename.split('__', 1)[1]
+        return self.filename
+
+
+with app.app_context():
+    db.create_all()
 
 # Routes
 @app.route('/')
@@ -137,8 +270,8 @@ def home():
     return redirect(url_for('login'))
 
 @app.template_filter('file_exists')
-def file_exists_filter(path):
-    return os.path.isfile(path)
+def file_exists_filter(filename):
+    return (app.config['UPLOAD_FOLDER'] / filename).is_file()
 
 @app.route('/signup', methods=['GET', 'POST'])
 def signup():
@@ -147,11 +280,14 @@ def signup():
         password = request.form['password']
         existing_user = User.query.filter_by(username=username).first()
         if existing_user:
-            return 'User already exists'
+            flash('User already exists')
+            return render_template('signup.html')
+
         hashed_pw = generate_password_hash(password)
         new_user = User(username=username, password_hash=hashed_pw)
         db.session.add(new_user)
         db.session.commit()
+        flash('Account created successfully. Please log in.')
         return redirect(url_for('login'))
     return render_template('signup.html')
 
@@ -165,7 +301,9 @@ def login():
             session['user'] = user.username
             session['user_id'] = user.id
             return redirect(url_for('dashboard'))
-        return 'Invalid credentials'
+
+        flash('Invalid username or password')
+        return render_template('login.html')
     return render_template('login.html')
 
 @app.route('/logout')
@@ -180,69 +318,34 @@ def dashboard():
         return redirect(url_for('login'))
 
     filename = request.args.get('filename')
-    uploads = Upload.query.filter_by(user_id=session['user_id']).all()
+    uploads = (
+        Upload.query
+        .filter_by(user_id=session['user_id'])
+        .order_by(Upload.timestamp.desc())
+        .all()
+    )
     table_html = None
-    columns = []
+    columns: list[str] = []
     summary = None
     suggestions = None
 
+    if not filename and uploads:
+        filename = uploads[0].filename
+
     if filename:
-        filepath = os.path.join('uploads', filename)
-        if os.path.exists(filepath):
+        filepath = app.config['UPLOAD_FOLDER'] / filename
+        if filepath.exists():
             try:
-                df = pd.read_csv(filepath)
-                df.columns = df.columns.str.strip()
-
-                preview_df = df.head(100)
-                table_html = preview_df.to_html(
-                    classes='table table-striped table-bordered',
-                    index=False
-                )
-                columns = df.columns.tolist()
+                df = _load_dataframe(filepath)
+                table_html, columns = _render_preview_table(df)
+                summary = _summarise_dataframe(df)
                 suggestions = generate_chart_suggestions(df)
-
-                summary = {}
-                for col in df.columns:
-                    col_data = df[col]
-
-                    # Categorical and text
-                    if col_data.dtype == 'object' or col_data.dtype.name == 'category':
-                        if col_data.dropna().empty:
-                            summary[col] = "No values available"
-                        else:
-                            value_counts = col_data.value_counts()
-                            top_value = value_counts.idxmax()
-                            top_count = value_counts.max()
-                            summary[col] = f"Most common: {top_value} ({top_count} times)"
-
-                    # Numeric
-                    elif pd.api.types.is_numeric_dtype(col_data):
-                        non_missing = col_data.dropna()
-                        if non_missing.empty:
-                            summary[col] = "No numeric data available"
-                        else:
-                            summary[col] = (
-                                f"Mean: {non_missing.mean():.2f}, "
-                                f"Median: {non_missing.median():.2f}, "
-                                f"Min: {non_missing.min()}, "
-                                f"Max: {non_missing.max()}"
-                            )
-
-                    # Anything else
-                    else:
-                        summary[col] = "No insight available"
-
-                # Missing data info
-                missing_data = df.isnull().sum()
-                for col, count in missing_data.items():
-                    if count > 0:
-                        if col in summary and summary[col]:
-                            summary[col] += f" | Missing: {count}"
-                        else:
-                            summary[col] = f"Missing: {count}"
-
             except Exception as e:
                 flash(f"Error loading file '{filename}': {e}")
+        else:
+            flash('Selected file not found on disk')
+
+    suggestions = suggestions or []
 
     return render_template(
         'dashboard.html',
@@ -269,102 +372,53 @@ def upload():
         flash('No selected file')
         return redirect(url_for('dashboard'))
 
-    if not file.filename.endswith('.csv'):
+    if not file.filename.lower().endswith('.csv'):
         flash('Only CSV files are allowed')
         return redirect(url_for('dashboard'))
 
-    uploads_dir = 'uploads'
-    os.makedirs(uploads_dir, exist_ok=True)
-    filepath = os.path.join(uploads_dir, file.filename)
+    safe_name = secure_filename(file.filename)
+    if not safe_name:
+        flash('Invalid filename')
+        return redirect(url_for('dashboard'))
+
+    stored_name = f"{uuid.uuid4().hex}__{safe_name}"
+    filepath = app.config['UPLOAD_FOLDER'] / stored_name
     file.save(filepath)
 
-    # Only add to DB if this filename hasn't already been uploaded by this user
-    existing = Upload.query.filter_by(filename=file.filename, user_id=session['user_id']).first()
-    if not existing:
-        new_upload = Upload(filename=file.filename, user_id=session['user_id'])
-        db.session.add(new_upload)
-        db.session.commit()
+    new_upload = Upload(filename=stored_name, user_id=session['user_id'])
+    db.session.add(new_upload)
 
     try:
-        df = pd.read_csv(filepath)
-        df.columns = df.columns.str.strip()
-
-        from pandas.api.types import is_string_dtype
-
-        for col in df.columns:
-            if is_string_dtype(df[col]):
-                parsed = None  # initialize to avoid "referenced before assignment"
-                if 'date' in col.lower() or 'time' in col.lower():
-                    for fmt in ['%Y-%m-%d', '%m/%d/%Y']:
-                        try:
-                            parsed = pd.to_datetime(df[col], format=fmt, errors='raise')
-                            break
-                        except Exception:
-                            parsed = None
-                    # If parsing failed with strict formats, try looser coercion
-                    if parsed is None:
-                        parsed = pd.to_datetime(df[col], errors='coerce')
-
-                    if parsed is not None and not parsed.isnull().all():
-                        df[col] = parsed
-
-        # Smart insights
-        summary = {}
-        for col in df.columns:
-            col_data = df[col]
-            if col_data.dtype == 'object' or col_data.dtype.name == 'category':
-                if col_data.dropna().empty:
-                    summary[col] = "No values available"
-                else:
-                    vc = col_data.value_counts()
-                    top_value = vc.idxmax()
-                    top_count = vc.max()
-                    summary[col] = f"Most common: {top_value} ({top_count} times)"
-            elif pd.api.types.is_numeric_dtype(col_data):
-                non_missing = col_data.dropna()
-                if non_missing.empty:
-                    summary[col] = "No numeric data available"
-                else:
-                    summary[col] = (
-                        f"Mean: {non_missing.mean():.2f}, "
-                        f"Median: {non_missing.median():.2f}, "
-                        f"Min: {non_missing.min()}, "
-                        f"Max: {non_missing.max()}"
-                    )
-            else:
-                summary[col] = "No insight available"
-
-        # Missing values
-        missing_data = df.isnull().sum()
-        for col, count in missing_data.items():
-            if count > 0:
-                if col in summary:
-                    summary[col] += f" | Missing: {count}"
-                else:
-                    summary[col] = f"Missing: {count}"
-
-        # Generate smarter chart suggestions
+        df = _load_dataframe(filepath)
+        summary = _summarise_dataframe(df)
         suggestions = generate_chart_suggestions(df)
-
-        # Preview table
-        preview_df = df.head(100)
-        table_html = preview_df.to_html(classes='table table-striped table-bordered', index=False)
-        columns = df.columns.tolist()
-
-        return render_template(
-            'dashboard.html',
-            user=session['user'],
-            table=table_html,
-            columns=columns,
-            uploads=Upload.query.filter_by(user_id=session['user_id']).all(),
-            summary=summary,
-            selected_file=file.filename,
-            suggestions=suggestions
-        )
-
+        table_html, columns = _render_preview_table(df)
+        db.session.commit()
     except Exception as e:
+        db.session.rollback()
+        filepath.unlink(missing_ok=True)
         flash(f'Error processing file: {e}')
         return redirect(url_for('dashboard'))
+
+    uploads = (
+        Upload.query
+        .filter_by(user_id=session['user_id'])
+        .order_by(Upload.timestamp.desc())
+        .all()
+    )
+
+    suggestions = suggestions or []
+
+    return render_template(
+        'dashboard.html',
+        user=session['user'],
+        table=table_html,
+        columns=columns,
+        uploads=uploads,
+        summary=summary,
+        selected_file=stored_name,
+        suggestions=suggestions
+    )
 
 @app.route('/visualize', methods=['POST'])
 def visualize():
@@ -380,28 +434,13 @@ def visualize():
         flash("Missing form data")
         return redirect(url_for('dashboard'))
 
-    filepath = os.path.join('uploads', filename)
-    if not os.path.exists(filepath):
+    filepath = app.config['UPLOAD_FOLDER'] / filename
+    if not filepath.exists():
         flash("Selected file not found")
         return redirect(url_for('dashboard'))
 
     try:
-        df = pd.read_csv(filepath)
-        df.columns = df.columns.str.strip()
-
-        # Try converting potential datetime columns
-        from pandas.api.types import is_string_dtype
-        for col in df.columns:
-            if is_string_dtype(df[col]):
-                if 'date' in col.lower() or 'time' in col.lower():
-                    for fmt in ['%Y-%m-%d', '%m/%d/%Y']:
-                        try:
-                            df[col] = pd.to_datetime(df[col], format=fmt, errors='raise')
-                            break
-                        except Exception:
-                            pass
-                    else:
-                        df[col] = pd.to_datetime(df[col], errors='coerce')
+        df = _load_dataframe(filepath)
 
         # Chart rendering logic
         if chart_type == 'pie':
@@ -447,53 +486,20 @@ def visualize():
 
         # Update suggestions, preview, summary
         suggestions = generate_chart_suggestions(df)
-        preview_df = df.head(100)
-        table_html = preview_df.to_html(classes='table table-striped table-bordered', index=False)
-        columns = df.columns.tolist()
-
-        # Safe summary stats (no warnings)
-        summary = {}
-        for col in df.columns:
-            col_data = df[col]
-
-            if col_data.dtype == 'object' or col_data.dtype.name == 'category':
-                if col_data.dropna().empty:
-                    summary[col] = "No values available"
-                else:
-                    value_counts = col_data.value_counts()
-                    top_value = value_counts.idxmax()
-                    top_count = value_counts.max()
-                    summary[col] = f"Most common: {top_value} ({top_count} times)"
-
-            elif pd.api.types.is_numeric_dtype(col_data):
-                non_missing = col_data.dropna()
-                if non_missing.empty:
-                    summary[col] = "No numeric data available"
-                else:
-                    summary[col] = (
-                        f"Mean: {non_missing.mean():.2f}, "
-                        f"Median: {non_missing.median():.2f}, "
-                        f"Min: {non_missing.min()}, "
-                        f"Max: {non_missing.max()}"
-                    )
-
-            else:
-                summary[col] = "No insight available"
-
-        missing_data = df.isnull().sum()
-        for col, count in missing_data.items():
-            if count > 0:
-                if col in summary:
-                    summary[col] += f" | Missing: {count}"
-                else:
-                    summary[col] = f"Missing: {count}"
+        table_html, columns = _render_preview_table(df)
+        summary = _summarise_dataframe(df)
 
         return render_template(
             'dashboard.html',
             user=session['user'],
             table=table_html,
             columns=columns,
-            uploads=Upload.query.filter_by(user_id=session['user_id']).all(),
+            uploads=(
+                Upload.query
+                .filter_by(user_id=session['user_id'])
+                .order_by(Upload.timestamp.desc())
+                .all()
+            ),
             selected_file=filename,
             chart=chart_html,
             summary=summary,
@@ -510,26 +516,32 @@ def delete_file():
         return redirect(url_for('login'))
 
     filename = request.form['filename']
-    filepath = os.path.join('uploads', filename)
+    filepath = app.config['UPLOAD_FOLDER'] / filename
 
     # Delete file from disk
-    if os.path.exists(filepath):
-        os.remove(filepath)
+    if filepath.exists():
+        filepath.unlink()
 
     # Delete file record from database
     upload = Upload.query.filter_by(user_id=session['user_id'], filename=filename).first()
+    display_name = upload.original_filename if upload else filename
     if upload:
         db.session.delete(upload)
         db.session.commit()
 
     # Find the next most recent file, if any
-    uploads = Upload.query.filter_by(user_id=session['user_id']).order_by(Upload.id.desc()).all()
+    uploads = (
+        Upload.query
+        .filter_by(user_id=session['user_id'])
+        .order_by(Upload.timestamp.desc())
+        .all()
+    )
     if uploads:
         next_filename = uploads[0].filename
-        flash(f"Deleted {filename}")
+        flash(f"Deleted {display_name}")
         return redirect(url_for('dashboard', filename=next_filename))
     else:
-        flash(f"Deleted {filename}")
+        flash(f"Deleted {display_name}")
         return redirect(url_for('dashboard'))
 
 
