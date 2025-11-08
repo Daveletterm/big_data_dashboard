@@ -48,74 +48,18 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
 
-def _looks_like_datetime(value: str) -> bool:
-    """Return True when the supplied string resembles a datetime value."""
-
-    if value is None:
-        return False
-
-    value = str(value).strip()
-    if not value:
-        return False
-
-    try:
-        pd.to_datetime(value)
-    except (TypeError, ValueError):
-        return False
-
-    return True
-
-
 def _coerce_datetime_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Coerce obvious datetime columns into datetime64."""
 
-    datetime_hints = ('date', 'time', 'timestamp', 'datetime', 'year', 'month')
+    datetime_hints = ('date', 'time', 'timestamp')
     string_like = df.select_dtypes(include=['object', 'string'])
 
     for column in string_like.columns:
         lowered = column.lower()
-        sample = df[column].dropna().head(10)
-
-        hinted = any(hint in lowered for hint in datetime_hints)
-        example_values = sample.astype(str).tolist()
-        resembles_datetime = sample.notna().all() and all(
-            _looks_like_datetime(value) for value in example_values
-        )
-
-        if hinted or resembles_datetime:
+        if any(hint in lowered for hint in datetime_hints):
             parsed = pd.to_datetime(df[column], errors='coerce')
             if not parsed.isna().all():
                 df[column] = parsed
-
-    return df
-
-
-def _coerce_numeric_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Convert obviously numeric string columns into numeric dtype."""
-
-    textual = df.select_dtypes(include=['object', 'string'])
-
-    for column in textual.columns:
-        series = textual[column].astype(str)
-
-        stripped = series.str.strip()
-        if stripped.empty:
-            continue
-
-        is_parenthesised = stripped.str.match(r"^\(.*\)$")
-
-        cleaned = (
-            stripped
-            .str.replace(r'[\s,$%]', '', regex=True)
-            .str.replace('\u2212', '-', regex=False)  # unicode minus
-            .str.replace('[()]', '', regex=True)
-        )
-
-        converted = pd.to_numeric(cleaned, errors='coerce')
-
-        if converted.notna().any():
-            converted.loc[is_parenthesised & converted.notna()] *= -1
-            df[column] = converted
 
     return df
 
@@ -126,7 +70,6 @@ def _load_dataframe(csv_path: Path) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
     df.columns = df.columns.str.strip()
     df = _coerce_datetime_columns(df)
-    df = _coerce_numeric_columns(df)
     return df
 
 
@@ -177,33 +120,12 @@ def _render_preview_table(df: pd.DataFrame) -> tuple[str, list[str]]:
     columns = df.columns.tolist()
     return table_html, columns
 
-def _categorical_columns(df: pd.DataFrame) -> list[str]:
-    """Return columns that should be treated as categorical."""
-
-    categorical = list(df.select_dtypes(include=['object', 'category']).columns)
-    bool_like = list(df.select_dtypes(include=['bool']).columns)
-
-    # Pandas nullable boolean type reports as object, so normalise them too.
-    nullable_bool = [
-        column
-        for column in df.columns
-        if str(df[column].dtype).lower() in {"boolean", "bool"}
-    ]
-
-    merged = []
-    for column in categorical + bool_like + nullable_bool:
-        if column not in merged:
-            merged.append(column)
-
-    return merged
-
-
 def generate_chart_suggestions(df, max_suggestions=10):
     suggestions = []
     df = df.dropna(axis=1, how='all')
 
     numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
-    categorical_cols = _categorical_columns(df)
+    categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
     datetime_cols = [
         column
         for column in df.columns
