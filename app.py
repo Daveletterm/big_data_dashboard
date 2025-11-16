@@ -1,29 +1,49 @@
-from flask import Flask, render_template, request, redirect, url_for, session, flash
+from flask import Flask, render_template, request, redirect, url_for, session, flash, abort
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from flask_sqlalchemy import SQLAlchemy
 from dotenv import load_dotenv
 from pathlib import Path
+import mimetypes
 import os
+import re
 import uuid
-from datetime import datetime
+from collections import defaultdict
+from datetime import datetime, timedelta
 
 import pandas as pd
 import plotly.express as px
 import plotly.io as pio
+import json
+
 pio.renderers.default = 'iframe'
-px.set_mapbox_access_token('pk.eyJ1IjoiZGF2ZWxldHRlcm0iLCJhIjoiY21kZmZrcWR3MGQ2MDJpcTNwejFkb2d5byJ9.hNgFSC79KzFzyBrgMBLKbA')
 
 # Load .env file if available
 load_dotenv()
 
+MAPBOX_TOKEN = os.getenv("MAPBOX_TOKEN")
+if MAPBOX_TOKEN:
+    px.set_mapbox_access_token(MAPBOX_TOKEN)
+else:
+    # Map charts will gracefully degrade if no token is supplied
+    os.environ.setdefault("MAPBOX_TOKEN", "")
+
 BASE_DIR = Path(__file__).resolve().parent
 
 app = Flask(__name__)
-app.secret_key = os.getenv('SECRET_KEY', os.urandom(24))
-app.config['UPLOAD_FOLDER'] = BASE_DIR / 'uploads'
-app.config['UPLOAD_FOLDER'].mkdir(parents=True, exist_ok=True)
+app.secret_key = os.getenv('SECRET_KEY')
+if not app.secret_key:
+    raise RuntimeError("SECRET_KEY must be set for session security. Add it to your environment.")
+
+UPLOAD_BASE = BASE_DIR / 'uploads'
+UPLOAD_BASE.mkdir(parents=True, exist_ok=True)
+app.config['UPLOAD_FOLDER'] = UPLOAD_BASE
 app.config.setdefault('MAX_CONTENT_LENGTH', 25 * 1024 * 1024)
+
+# Basic in-memory request throttle (per IP per route)
+_rate_limits: dict[str, list[datetime]] = defaultdict(list)
+RATE_LIMIT_WINDOW = timedelta(minutes=1)
+RATE_LIMIT_COUNT = 30
 
 # Database configuration with PostgreSQL preference and SQLite fallback
 def _determine_database_uri():
@@ -48,6 +68,42 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
 
+def _client_ip() -> str:
+    return request.headers.get('X-Forwarded-For', request.remote_addr or 'unknown')
+
+
+def _enforce_rate_limit(key: str) -> None:
+    now = datetime.utcnow()
+    window_start = now - RATE_LIMIT_WINDOW
+    entries = [ts for ts in _rate_limits[key] if ts > window_start]
+    entries.append(now)
+    _rate_limits[key] = entries
+    if len(entries) > RATE_LIMIT_COUNT:
+        abort(429, description="Too many requests; please slow down.")
+
+
+def _user_upload_dir(user_id: int) -> Path:
+    path = UPLOAD_BASE / f"user_{user_id}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _validate_csv_upload(file) -> None:
+    allowed_mimes = {'text/csv', 'application/csv', 'application/vnd.ms-excel'}
+    mime_guess, _ = mimetypes.guess_type(file.filename)
+    content_type = (file.mimetype or '').split(';')[0].strip()
+    if content_type and content_type not in allowed_mimes and mime_guess not in allowed_mimes:
+        raise ValueError('Invalid file type. Please upload a CSV file.')
+
+
+def _enforce_dataframe_limits(df: pd.DataFrame, max_rows: int = 150_000, max_cols: int = 150) -> pd.DataFrame:
+    if df.shape[1] > max_cols:
+        raise ValueError(f"CSV has too many columns ({df.shape[1]}). Please upload a file with <= {max_cols} columns.")
+    if df.shape[0] > max_rows:
+        df = df.sample(n=max_rows, random_state=42)
+    return df
+
+
 def _coerce_datetime_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Coerce obvious datetime columns into datetime64."""
 
@@ -64,12 +120,20 @@ def _coerce_datetime_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _load_dataframe(csv_path: Path) -> pd.DataFrame:
-    """Load a CSV file into a cleaned dataframe."""
+def _load_dataframe(csv_path: Path, max_rows: int = 150_000) -> pd.DataFrame:
+    """Load a CSV file into a cleaned dataframe with limits and streaming."""
 
-    df = pd.read_csv(csv_path)
+    dfs = []
+    rows_read = 0
+    for chunk in pd.read_csv(csv_path, chunksize=25_000, low_memory=False):
+        dfs.append(chunk)
+        rows_read += len(chunk)
+        if rows_read >= max_rows:
+            break
+    df = pd.concat(dfs, ignore_index=True)
     df.columns = df.columns.str.strip()
     df = _coerce_datetime_columns(df)
+    df = _enforce_dataframe_limits(df, max_rows=max_rows)
     return df
 
 
@@ -114,11 +178,104 @@ def _summarise_dataframe(df: pd.DataFrame) -> dict[str, str]:
     return summary
 
 
+def _data_quality_signals(df: pd.DataFrame) -> dict[str, str]:
+    signals: dict[str, str] = {}
+    duplicate_rows = int(df.duplicated().sum())
+    if duplicate_rows:
+        signals['duplicates'] = f"{duplicate_rows} duplicate rows detected"
+    numeric_cols = df.select_dtypes(include=['number'])
+    outlier_messages = []
+    for col in numeric_cols.columns:
+        series = numeric_cols[col].dropna()
+        if len(series) < 10:
+            continue
+        zscores = ((series - series.mean()) / (series.std() or 1)).abs()
+        outliers = int((zscores > 3).sum())
+        if outliers:
+            outlier_messages.append(f"{col}: {outliers} potential outliers")
+    if outlier_messages:
+        signals['outliers'] = '; '.join(outlier_messages)
+    return signals
+
+
+def _generate_additional_insights(df: pd.DataFrame) -> dict[str, str]:
+    insights: dict[str, str] = {}
+    dtypes = df.dtypes.apply(lambda x: str(x)).value_counts()
+    insights['types'] = ', '.join(f"{dtype}: {count}" for dtype, count in dtypes.items())
+    nulls = df.isnull().sum().sum()
+    if nulls:
+        insights['missing'] = f"Total missing values: {nulls}"
+    return insights
+
+
+def _build_profile_charts(df: pd.DataFrame) -> dict[str, str]:
+    charts: dict[str, str] = {}
+    numeric_cols = df.select_dtypes(include=['number'])
+    if numeric_cols.shape[1] >= 2:
+        corr = numeric_cols.corr().fillna(0)
+        fig_corr = px.imshow(corr, text_auto='.2f', color_continuous_scale='Blues', title='Correlation matrix')
+        charts['correlation'] = fig_corr.to_html(full_html=False)
+    null_matrix = df.isnull()
+    if null_matrix.values.any():
+        fig_null = px.imshow(
+            null_matrix.astype(int),
+            color_continuous_scale=[[0, 'rgb(0,123,255)'], [1, 'rgb(220,53,69)']],
+            title='Null heatmap',
+            labels={'color': 'Null (1=yes)'}
+        )
+        charts['nulls'] = fig_null.to_html(full_html=False)
+    return charts
+
+
 def _render_preview_table(df: pd.DataFrame) -> tuple[str, list[str]]:
     preview_df = df.head(100)
     table_html = preview_df.to_html(classes='table table-striped table-bordered', index=False)
     columns = df.columns.tolist()
     return table_html, columns
+
+
+def _save_profile(upload: Upload, df: pd.DataFrame) -> None:
+    schema = {col: str(dtype) for col, dtype in df.dtypes.items()}
+    null_summary = df.isnull().sum().to_dict()
+    quality_notes = _data_quality_signals(df)
+    profile = DatasetProfile(
+        upload_id=upload.id,
+        schema=json.dumps(schema),
+        null_summary=json.dumps(null_summary),
+        quality_notes=json.dumps(quality_notes)
+    )
+    db.session.add(profile)
+
+
+def _schema_drift_message(user_id: int, original_filename: str, current_schema: dict[str, str], *, exclude_upload_id: int | None = None) -> str | None:
+    last_upload = (
+        Upload.query
+        .filter(Upload.user_id == user_id)
+        .filter(Upload.filename.endswith(f"__{original_filename}"))
+        .filter(Upload.id != exclude_upload_id)
+        .order_by(Upload.timestamp.desc())
+        .first()
+    )
+    if not last_upload:
+        return None
+    profile = DatasetProfile.query.filter_by(upload_id=last_upload.id).order_by(DatasetProfile.created_at.desc()).first()
+    if not profile:
+        return None
+    previous_schema = json.loads(profile.schema)
+    added = set(current_schema) - set(previous_schema)
+    removed = set(previous_schema) - set(current_schema)
+    changes = []
+    if added:
+        changes.append(f"New columns: {', '.join(sorted(added))}")
+    if removed:
+        changes.append(f"Removed columns: {', '.join(sorted(removed))}")
+    if not changes:
+        for col, dtype in current_schema.items():
+            if col in previous_schema and previous_schema[col] != dtype:
+                changes.append(f"Column {col} type changed from {previous_schema[col]} to {dtype}")
+    if changes:
+        return '; '.join(changes)
+    return None
 
 def generate_chart_suggestions(df, max_suggestions=10):
     suggestions = []
@@ -241,6 +398,25 @@ class Upload(db.Model):
         return self.filename
 
 
+class SavedChart(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    upload_id = db.Column(db.Integer, db.ForeignKey('upload.id'), nullable=False)
+    title = db.Column(db.String(255), nullable=False)
+    chart_html = db.Column(db.Text, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    shared_token = db.Column(db.String(64), unique=True, nullable=True)
+
+
+class DatasetProfile(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    upload_id = db.Column(db.Integer, db.ForeignKey('upload.id'), nullable=False)
+    schema = db.Column(db.Text, nullable=False)
+    null_summary = db.Column(db.Text, nullable=True)
+    quality_notes = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+
 with app.app_context():
     db.create_all()
 
@@ -251,10 +427,14 @@ def home():
 
 @app.template_filter('file_exists')
 def file_exists_filter(filename):
-    return (app.config['UPLOAD_FOLDER'] / filename).is_file()
+    user_id = session.get('user_id')
+    if not user_id:
+        return False
+    return (_user_upload_dir(user_id) / filename).is_file()
 
 @app.route('/signup', methods=['GET', 'POST'])
 def signup():
+    _enforce_rate_limit(f"signup:{_client_ip()}")
     if request.method == 'POST':
         username = request.form['username']
         password = request.form['password']
@@ -273,6 +453,7 @@ def signup():
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
+    _enforce_rate_limit(f"login:{_client_ip()}")
     if request.method == 'POST':
         username = request.form['username']
         password = request.form['password']
@@ -312,14 +493,27 @@ def dashboard():
     if not filename and uploads:
         filename = uploads[0].filename
 
+    profile_charts = {}
+    quality_signals = {}
+    extra_insights = {}
+    saved_charts = (
+        SavedChart.query
+        .filter_by(user_id=session['user_id'])
+        .order_by(SavedChart.created_at.desc())
+        .all()
+    )
+
     if filename:
-        filepath = app.config['UPLOAD_FOLDER'] / filename
+        filepath = _user_upload_dir(session['user_id']) / filename
         if filepath.exists():
             try:
                 df = _load_dataframe(filepath)
                 table_html, columns = _render_preview_table(df)
                 summary = _summarise_dataframe(df)
                 suggestions = generate_chart_suggestions(df)
+                profile_charts = _build_profile_charts(df)
+                quality_signals = _data_quality_signals(df)
+                extra_insights = _generate_additional_insights(df)
             except Exception as e:
                 flash(f"Error loading file '{filename}': {e}")
         else:
@@ -335,7 +529,11 @@ def dashboard():
         uploads=uploads,
         selected_file=filename,
         summary=summary,
-        suggestions=suggestions
+        suggestions=suggestions,
+        profile_charts=profile_charts,
+        quality_signals=quality_signals,
+        extra_insights=extra_insights,
+        saved_charts=saved_charts
     )
 
 @app.route('/upload', methods=['POST'])
@@ -343,11 +541,18 @@ def upload():
     if 'user' not in session:
         return redirect(url_for('login'))
 
+    _enforce_rate_limit(f"upload:{_client_ip()}")
+
     if 'csv_file' not in request.files:
         flash('No file part')
         return redirect(url_for('dashboard'))
 
     file = request.files['csv_file']
+    try:
+        _validate_csv_upload(file)
+    except Exception as exc:
+        flash(str(exc))
+        return redirect(url_for('dashboard'))
     if file.filename == '':
         flash('No selected file')
         return redirect(url_for('dashboard'))
@@ -362,7 +567,8 @@ def upload():
         return redirect(url_for('dashboard'))
 
     stored_name = f"{uuid.uuid4().hex}__{safe_name}"
-    filepath = app.config['UPLOAD_FOLDER'] / stored_name
+    user_dir = _user_upload_dir(session['user_id'])
+    filepath = user_dir / stored_name
     file.save(filepath)
 
     new_upload = Upload(filename=stored_name, user_id=session['user_id'])
@@ -374,6 +580,16 @@ def upload():
         suggestions = generate_chart_suggestions(df)
         table_html, columns = _render_preview_table(df)
         db.session.commit()
+        _save_profile(new_upload, df)
+        db.session.commit()
+        drift = _schema_drift_message(
+            session['user_id'],
+            safe_name,
+            {col: str(dtype) for col, dtype in df.dtypes.items()},
+            exclude_upload_id=new_upload.id
+        )
+        if drift:
+            flash(f"Schema drift detected: {drift}")
     except Exception as e:
         db.session.rollback()
         filepath.unlink(missing_ok=True)
@@ -397,7 +613,16 @@ def upload():
         uploads=uploads,
         summary=summary,
         selected_file=stored_name,
-        suggestions=suggestions
+        suggestions=suggestions,
+        profile_charts=_build_profile_charts(df),
+        quality_signals=_data_quality_signals(df),
+        extra_insights=_generate_additional_insights(df),
+        saved_charts=(
+            SavedChart.query
+            .filter_by(user_id=session['user_id'])
+            .order_by(SavedChart.created_at.desc())
+            .all()
+        )
     )
 
 @app.route('/visualize', methods=['POST'])
@@ -405,22 +630,43 @@ def visualize():
     if 'user' not in session:
         return redirect(url_for('login'))
 
+    _enforce_rate_limit(f"visualize:{_client_ip()}")
+
     filename = request.form.get('filename')
     x_column = request.form.get('x_column')
     y_column = request.form.get('y_column', '')
     chart_type = request.form.get('chart_type')
+    filter_column = request.form.get('filter_column')
+    filter_value = request.form.get('filter_value')
+    sample_fraction = request.form.get('sample_fraction')
+    save_title = request.form.get('save_title')
+    shareable = request.form.get('shareable') == 'on'
 
     if not filename or not x_column or not chart_type:
         flash("Missing form data")
         return redirect(url_for('dashboard'))
+    if chart_type != 'pie' and not y_column:
+        flash('Y axis is required for this chart type')
+        return redirect(url_for('dashboard'))
 
-    filepath = app.config['UPLOAD_FOLDER'] / filename
+    filepath = _user_upload_dir(session['user_id']) / filename
     if not filepath.exists():
         flash("Selected file not found")
         return redirect(url_for('dashboard'))
 
     try:
         df = _load_dataframe(filepath)
+
+        if filter_column and filter_column in df.columns and filter_value:
+            mask = df[filter_column].astype(str).str.contains(re.escape(filter_value), case=False, na=False)
+            df = df[mask]
+        if sample_fraction:
+            try:
+                frac = float(sample_fraction)
+                if 0 < frac < 1:
+                    df = df.sample(frac=frac, random_state=42)
+            except ValueError:
+                flash('Invalid sample fraction; ignoring.')
 
         # Chart rendering logic
         if chart_type == 'pie':
@@ -434,8 +680,12 @@ def visualize():
         elif chart_type == 'scatter':
             fig = px.scatter(df, x=x_column, y=y_column)
         elif chart_type == 'scatter_map':
+            if not MAPBOX_TOKEN:
+                flash('Mapbox token missing; map charts may not render correctly.')
             if df[x_column].dtype.kind in 'iuf' and df[y_column].dtype.kind in 'iuf':
                 df = df[(df[y_column].between(-90, 90)) & (df[x_column].between(-180, 180))]
+            else:
+                raise ValueError('Selected latitude/longitude columns must be numeric.')
             fig = px.scatter_mapbox(
                 df,
                 lat=y_column,
@@ -446,8 +696,12 @@ def visualize():
                 mapbox_style='carto-positron'
             )
         elif chart_type == 'density_map':
+            if not MAPBOX_TOKEN:
+                flash('Mapbox token missing; map charts may not render correctly.')
             if df[x_column].dtype.kind in 'iuf' and df[y_column].dtype.kind in 'iuf':
                 df = df[(df[y_column].between(-90, 90)) & (df[x_column].between(-180, 180))]
+            else:
+                raise ValueError('Selected latitude/longitude columns must be numeric.')
             fig = px.density_mapbox(
                 df,
                 lat=y_column,
@@ -463,6 +717,21 @@ def visualize():
             return redirect(url_for('dashboard'))
 
         chart_html = fig.to_html(full_html=False)
+
+        if save_title:
+            token = uuid.uuid4().hex if shareable else None
+            upload = Upload.query.filter_by(filename=filename, user_id=session['user_id']).first()
+            if not upload:
+                raise ValueError('Upload not found for saving chart')
+            saved = SavedChart(
+                user_id=session['user_id'],
+                upload_id=upload.id,
+                title=save_title,
+                chart_html=chart_html,
+                shared_token=token
+            )
+            db.session.add(saved)
+            db.session.commit()
 
         # Update suggestions, preview, summary
         suggestions = generate_chart_suggestions(df)
@@ -483,7 +752,16 @@ def visualize():
             selected_file=filename,
             chart=chart_html,
             summary=summary,
-            suggestions=suggestions
+            suggestions=suggestions,
+            profile_charts=_build_profile_charts(df),
+            quality_signals=_data_quality_signals(df),
+            extra_insights=_generate_additional_insights(df),
+            saved_charts=(
+                SavedChart.query
+                .filter_by(user_id=session['user_id'])
+                .order_by(SavedChart.created_at.desc())
+                .all()
+            )
         )
 
     except Exception as e:
@@ -496,7 +774,7 @@ def delete_file():
         return redirect(url_for('login'))
 
     filename = request.form['filename']
-    filepath = app.config['UPLOAD_FOLDER'] / filename
+    filepath = _user_upload_dir(session['user_id']) / filename
 
     # Delete file from disk
     if filepath.exists():
@@ -507,6 +785,8 @@ def delete_file():
     display_name = upload.original_filename if upload else filename
     if upload:
         db.session.delete(upload)
+        DatasetProfile.query.filter_by(upload_id=upload.id).delete()
+        SavedChart.query.filter_by(upload_id=upload.id).delete()
         db.session.commit()
 
     # Find the next most recent file, if any
@@ -523,6 +803,24 @@ def delete_file():
     else:
         flash(f"Deleted {display_name}")
         return redirect(url_for('dashboard'))
+
+
+@app.route('/save_chart/<int:chart_id>/delete', methods=['POST'])
+def delete_saved_chart(chart_id: int):
+    if 'user' not in session:
+        return redirect(url_for('login'))
+
+    chart = SavedChart.query.filter_by(id=chart_id, user_id=session['user_id']).first_or_404()
+    db.session.delete(chart)
+    db.session.commit()
+    flash('Saved chart deleted')
+    return redirect(url_for('dashboard'))
+
+
+@app.route('/charts/<token>')
+def shared_chart(token: str):
+    chart = SavedChart.query.filter_by(shared_token=token).first_or_404()
+    return render_template('shared_chart.html', chart_html=chart.chart_html, title=chart.title)
 
 
 
