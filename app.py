@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from flask import Flask, render_template, request, redirect, url_for, session, flash, abort
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
