@@ -786,9 +786,9 @@ def delete_file():
     upload = Upload.query.filter_by(user_id=session['user_id'], filename=filename).first()
     display_name = upload.original_filename if upload else filename
     if upload:
-        db.session.delete(upload)
         DatasetProfile.query.filter_by(upload_id=upload.id).delete()
         SavedChart.query.filter_by(upload_id=upload.id).delete()
+        db.session.delete(upload)
         db.session.commit()
 
     # Find the next most recent file, if any
