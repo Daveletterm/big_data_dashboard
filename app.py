@@ -91,12 +91,46 @@ def _user_upload_dir(user_id: int) -> Path:
     return path
 
 
-def _validate_csv_upload(file) -> None:
-    allowed_mimes = {'text/csv', 'application/csv', 'application/vnd.ms-excel'}
+def _validate_upload_file(file) -> None:
+    allowed_mimes = {
+        'text/csv',
+        'application/csv',
+        'application/vnd.ms-excel',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    }
+    allowed_extensions = {'.csv', '.xlsx', '.xls'}
+
     mime_guess, _ = mimetypes.guess_type(file.filename)
     content_type = (file.mimetype or '').split(';')[0].strip()
+    extension = Path(file.filename).suffix.lower()
+
+    if extension not in allowed_extensions:
+        raise ValueError('Invalid file type. Please upload a CSV or Excel file.')
+
     if content_type and content_type not in allowed_mimes and mime_guess not in allowed_mimes:
-        raise ValueError('Invalid file type. Please upload a CSV file.')
+        raise ValueError('Invalid file type. Please upload a CSV or Excel file.')
+
+
+_GSHEET_PATTERN = re.compile(r"docs\.google\.com/spreadsheets/d/([a-zA-Z0-9-_]+)")
+
+
+def _google_sheet_export_url(url: str) -> str:
+    match = _GSHEET_PATTERN.search(url)
+    if not match:
+        raise ValueError('Please provide a valid Google Sheets sharing link.')
+
+    sheet_id = match.group(1)
+    gid_match = re.search(r"gid=([0-9]+)", url)
+    gid_suffix = f"&gid={gid_match.group(1)}" if gid_match else ""
+    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv{gid_suffix}"
+
+
+def _load_google_sheet(url: str) -> pd.DataFrame:
+    export_url = _google_sheet_export_url(url)
+    df = pd.read_csv(export_url)
+    if df.empty:
+        raise ValueError('The provided Google Sheet is empty or could not be read.')
+    return df
 
 
 def _enforce_dataframe_limits(df: pd.DataFrame, max_rows: int = 150_000, max_cols: int = 150) -> pd.DataFrame:
@@ -123,17 +157,23 @@ def _coerce_datetime_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _load_dataframe(csv_path: Path, max_rows: int = 150_000) -> pd.DataFrame:
-    """Load a CSV file into a cleaned dataframe with limits and streaming."""
+def _load_dataframe(data_path: Path, max_rows: int = 150_000) -> pd.DataFrame:
+    """Load a CSV or Excel file into a cleaned dataframe with limits and streaming."""
 
-    dfs = []
-    rows_read = 0
-    for chunk in pd.read_csv(csv_path, chunksize=25_000, low_memory=False):
-        dfs.append(chunk)
-        rows_read += len(chunk)
-        if rows_read >= max_rows:
-            break
-    df = pd.concat(dfs, ignore_index=True)
+    suffix = data_path.suffix.lower()
+
+    if suffix in {'.xlsx', '.xls'}:
+        df = pd.read_excel(data_path)
+    else:
+        dfs = []
+        rows_read = 0
+        for chunk in pd.read_csv(data_path, chunksize=25_000, low_memory=False):
+            dfs.append(chunk)
+            rows_read += len(chunk)
+            if rows_read >= max_rows:
+                break
+        df = pd.concat(dfs, ignore_index=True)
+
     df.columns = df.columns.str.strip()
     df = _coerce_datetime_columns(df)
     df = _enforce_dataframe_limits(df, max_rows=max_rows)
@@ -461,7 +501,9 @@ with app.app_context():
 # Routes
 @app.route('/')
 def home():
-    return redirect(url_for('login'))
+    if 'user' in session:
+        return redirect(url_for('dashboard'))
+    return render_template('index.html')
 
 @app.template_filter('file_exists')
 def file_exists_filter(filename):
@@ -581,39 +623,58 @@ def upload():
 
     _enforce_rate_limit(f"upload:{_client_ip()}")
 
-    if 'csv_file' not in request.files:
-        flash('No file part')
+    file = request.files.get('data_file')
+    google_sheet_url = request.form.get('gsheet_url', '').strip()
+
+    if (not file or file.filename == '') and not google_sheet_url:
+        flash('Please upload a file or provide a Google Sheets link.')
         return redirect(url_for('dashboard'))
 
-    file = request.files['csv_file']
-    try:
-        _validate_csv_upload(file)
-    except Exception as exc:
-        flash(str(exc))
-        return redirect(url_for('dashboard'))
-    if file.filename == '':
-        flash('No selected file')
-        return redirect(url_for('dashboard'))
-
-    if not file.filename.lower().endswith('.csv'):
-        flash('Only CSV files are allowed')
-        return redirect(url_for('dashboard'))
-
-    safe_name = secure_filename(file.filename)
-    if not safe_name:
-        flash('Invalid filename')
-        return redirect(url_for('dashboard'))
-
-    stored_name = f"{uuid.uuid4().hex}__{safe_name}"
     user_dir = _user_upload_dir(session['user_id'])
-    filepath = user_dir / stored_name
-    file.save(filepath)
+
+    df: pd.DataFrame
+    safe_name: str
+    stored_name: str
+    filepath: Path
+
+    if google_sheet_url:
+        try:
+            df = _load_google_sheet(google_sheet_url)
+        except Exception as exc:
+            flash(f'Google Sheets import failed: {exc}')
+            return redirect(url_for('dashboard'))
+
+        safe_name = secure_filename(f"google-sheet-{datetime.utcnow().strftime('%Y%m%d')}.csv") or 'google-sheet.csv'
+        stored_name = f"{uuid.uuid4().hex}__{safe_name}"
+        filepath = user_dir / stored_name
+        df.to_csv(filepath, index=False)
+        df = _load_dataframe(filepath)
+    else:
+        try:
+            _validate_upload_file(file)
+        except Exception as exc:
+            flash(str(exc))
+            return redirect(url_for('dashboard'))
+
+        safe_name = secure_filename(file.filename)
+        if not safe_name:
+            flash('Invalid filename')
+            return redirect(url_for('dashboard'))
+
+        stored_name = f"{uuid.uuid4().hex}__{safe_name}"
+        filepath = user_dir / stored_name
+        file.save(filepath)
+
+        try:
+            df = _load_dataframe(filepath)
+        except Exception:
+            filepath.unlink(missing_ok=True)
+            raise
 
     new_upload = Upload(filename=stored_name, user_id=session['user_id'])
     db.session.add(new_upload)
 
     try:
-        df = _load_dataframe(filepath)
         summary = _summarise_dataframe(df)
         suggestions = generate_chart_suggestions(df)
         table_html, columns = _render_preview_table(df)

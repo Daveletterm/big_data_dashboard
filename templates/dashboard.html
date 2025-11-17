@@ -22,16 +22,26 @@
   <div class="container mt-4">
 
     <!-- Upload Form -->
-    <h2 class="mb-4">Upload a CSV</h2>
+    <div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
+      <h2 class="mb-0">Upload data or import Sheets</h2>
+      <span class="badge text-bg-light">CSV • Excel • Google Sheets</span>
+    </div>
+    <p class="text-muted mt-1">Bring in your files or paste a Google Sheets link—everything is profiled for insights and quality.</p>
     <form method="POST" action="{{ url_for('upload') }}" enctype="multipart/form-data" class="mb-4">
-      <div class="row g-3 align-items-center">
-        <div class="col-auto">
-          <input type="file" name="csv_file" class="form-control" required>
+      <div class="row g-3 align-items-end">
+        <div class="col-lg-4 col-md-6">
+          <label class="form-label fw-semibold">Upload CSV or Excel</label>
+          <input type="file" name="data_file" class="form-control" accept=".csv,.xlsx,.xls">
+          <div class="form-text">Max 25MB; large files are sampled to keep performance predictable.</div>
         </div>
-        <div class="col-auto">
-          <button type="submit" class="btn btn-primary">Upload</button>
+        <div class="col-lg-5 col-md-6">
+          <label class="form-label fw-semibold">Or paste a Google Sheets link</label>
+          <input type="url" name="gsheet_url" class="form-control" placeholder="https://docs.google.com/spreadsheets/d/...">
+          <div class="form-text">We’ll fetch a CSV export from the shared sheet.</div>
         </div>
-        <div class="col-auto text-muted small">Max 25MB; large files are sampled to keep performance predictable.</div>
+        <div class="col-lg-3 col-md-12 d-grid">
+          <button type="submit" class="btn btn-primary btn-lg">Add dataset</button>
+        </div>
       </div>
     </form>
 
