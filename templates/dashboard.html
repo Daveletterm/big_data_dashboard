@@ -4,17 +4,19 @@
   <meta charset="UTF-8" />
   <title>Big Data Dashboard</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
   <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
 </head>
-<body class="bg-light">
+<body>
 
   <!-- Navbar -->
-  <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+  <nav class="navbar navbar-expand-lg navbar-light">
     <div class="container-fluid">
       <a class="navbar-brand" href="#">Big Data Dashboard</a>
       <div class="d-flex">
-        <span class="navbar-text text-white me-3">Logged in as {{ user }}</span>
-        <a class="btn btn-outline-light" href="{{ url_for('logout') }}">Logout</a>
+        <button id="themeToggle" type="button" class="btn btn-sm btn-toggle-theme me-2">🌞 Light</button>
+        <span class="navbar-text me-3">Logged in as {{ user }}</span>
+        <a class="btn btn-outline-primary" href="{{ url_for('logout') }}">Logout</a>
       </div>
     </div>
   </nav>
@@ -22,16 +24,26 @@
   <div class="container mt-4">
 
     <!-- Upload Form -->
-    <h2 class="mb-4">Upload a CSV</h2>
+    <div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
+      <h2 class="mb-0">Upload data or import Sheets</h2>
+      <span class="badge text-bg-light">CSV • Excel • Google Sheets</span>
+    </div>
+    <p class="text-muted mt-1">Bring in your files or paste a Google Sheets link—everything is profiled for insights and quality.</p>
     <form method="POST" action="{{ url_for('upload') }}" enctype="multipart/form-data" class="mb-4">
-      <div class="row g-3 align-items-center">
-        <div class="col-auto">
-          <input type="file" name="csv_file" class="form-control" required>
+      <div class="row g-3 align-items-end">
+        <div class="col-lg-4 col-md-6">
+          <label class="form-label fw-semibold">Upload CSV or Excel</label>
+          <input type="file" name="data_file" class="form-control" accept=".csv,.xlsx,.xls">
+          <div class="form-text">Max 25MB; large files are sampled to keep performance predictable.</div>
         </div>
-        <div class="col-auto">
-          <button type="submit" class="btn btn-primary">Upload</button>
+        <div class="col-lg-5 col-md-6">
+          <label class="form-label fw-semibold">Or paste a Google Sheets link</label>
+          <input type="url" name="gsheet_url" class="form-control" placeholder="https://docs.google.com/spreadsheets/d/...">
+          <div class="form-text">We’ll fetch a CSV export from the shared sheet.</div>
         </div>
-        <div class="col-auto text-muted small">Max 25MB; large files are sampled to keep performance predictable.</div>
+        <div class="col-lg-3 col-md-12 d-grid">
+          <button type="submit" class="btn btn-primary btn-lg">Add dataset</button>
+        </div>
       </div>
     </form>
 
@@ -70,12 +82,15 @@
         <div class="accordion-item">
           <h2 class="accordion-header" id="insightHeading">
             <button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#collapseInsights">
-              Smart Insights
+              <span class="section-heading"><span class="dot"></span> Smart Insights</span>
             </button>
           </h2>
           <div id="collapseInsights" class="accordion-collapse collapse show">
             <div class="accordion-body">
-              <p class="text-muted">Quick, plain‑English highlights for every column and the dataset as a whole.</p>
+              <p class="text-muted">Brief summary of what this dataset appears to be and the kinds of insights it can surface.</p>
+              {% if dataset_synopsis %}
+                <div class="alert alert-secondary py-2">{{ dataset_synopsis }}</div>
+              {% endif %}
               <ul class="list-group">
                 {% for col, insight in summary.items() %}
                   <li class="list-group-item"><strong>{{ col }}</strong>: {{ insight }}</li>
@@ -305,6 +320,20 @@
 
   <script>
     document.addEventListener("DOMContentLoaded", function () {
+      const root = document.documentElement;
+      const themeToggle = document.getElementById("themeToggle");
+      const storedTheme = localStorage.getItem("theme-preference") || "light";
+      root.setAttribute("data-theme", storedTheme);
+      themeToggle.textContent = storedTheme === "dark" ? "🌙 Dark" : "🌞 Light";
+
+      themeToggle.addEventListener("click", () => {
+        const current = root.getAttribute("data-theme") === "dark" ? "dark" : "light";
+        const next = current === "dark" ? "light" : "dark";
+        root.setAttribute("data-theme", next);
+        localStorage.setItem("theme-preference", next);
+        themeToggle.textContent = next === "dark" ? "🌙 Dark" : "🌞 Light";
+      });
+
       const fileList = document.getElementById("fileList");
       let selected = document.querySelector(".file-item.list-group-item-info");
       if (fileList) {

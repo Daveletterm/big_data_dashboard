@@ -1,0 +1,116 @@
+:root {
+  --bg-color: #f8f9fb;
+  --card-bg: #ffffff;
+  --text-color: #1f2933;
+  --muted-color: #6c7a89;
+  --border-color: #e5e7eb;
+  --accent: #0d6efd;
+}
+
+[data-theme="dark"] {
+  --bg-color: #0f172a;
+  --card-bg: #111827;
+  --text-color: #e5e7eb;
+  --muted-color: #9ca3af;
+  --border-color: #1f2937;
+  --accent: #60a5fa;
+}
+
+body {
+  background: var(--bg-color);
+  color: var(--text-color);
+  transition: background 0.3s ease, color 0.3s ease;
+}
+
+.card,
+.accordion-item,
+.list-group-item,
+.navbar,
+.alert {
+  background-color: var(--card-bg);
+  color: var(--text-color);
+  border-color: var(--border-color) !important;
+}
+
+.navbar-dark,
+.navbar-light {
+  background: var(--card-bg) !important;
+  color: var(--text-color) !important;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
+}
+
+.navbar-dark .navbar-brand,
+.navbar-dark .navbar-text,
+.navbar-dark .nav-link,
+.navbar-light .navbar-brand,
+.navbar-light .navbar-text,
+.navbar-light .nav-link {
+  color: var(--text-color) !important;
+}
+
+.btn-toggle-theme {
+  border: 1px solid var(--border-color);
+  background: var(--card-bg);
+  color: var(--text-color);
+}
+
+.list-group-item-info {
+  background: rgba(13, 110, 253, 0.12);
+  color: var(--text-color);
+}
+
+.table {
+  color: var(--text-color);
+}
+
+.table-striped > tbody > tr:nth-of-type(odd) > * {
+  color: var(--text-color);
+}
+
+.badge.text-bg-light {
+  background: rgba(13, 110, 253, 0.12) !important;
+  color: var(--accent) !important;
+}
+
+.section-heading {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.section-heading .dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+[data-theme="dark"] .accordion-button:not(.collapsed) {
+  background: rgba(96, 165, 250, 0.12);
+  color: var(--text-color);
+}
+
+[data-theme="dark"] .accordion-button {
+  background: var(--card-bg);
+  color: var(--text-color);
+}
+
+[data-theme="dark"] .accordion-button::after {
+  filter: invert(1);
+}
+
+[data-theme="dark"] .alert-warning {
+  background: rgba(251, 191, 36, 0.15);
+  color: #facc15;
+}
+
+[data-theme="dark"] .btn.btn-outline-danger,
+[data-theme="dark"] .btn.btn-outline-primary,
+[data-theme="dark"] .btn.btn-outline-light {
+  color: var(--text-color);
+  border-color: var(--border-color);
+}
+
+[data-theme="dark"] .list-group-item {
+  background-color: var(--card-bg);
+}
