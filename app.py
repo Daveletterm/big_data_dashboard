@@ -142,19 +142,44 @@ def _enforce_dataframe_limits(df: pd.DataFrame, max_rows: int = 150_000, max_col
 
 
 def _coerce_datetime_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Coerce obvious datetime columns into datetime64."""
+    """Coerce obvious datetime columns into datetime64 with safeguards."""
 
     datetime_hints = ('date', 'time', 'timestamp')
     string_like = df.select_dtypes(include=['object', 'string'])
 
     for column in string_like.columns:
         lowered = column.lower()
-        if any(hint in lowered for hint in datetime_hints):
-            parsed = pd.to_datetime(df[column], errors='coerce')
-            if not parsed.isna().all():
-                df[column] = parsed
+        if not any(hint in lowered for hint in datetime_hints):
+            continue
+
+        sample = string_like[column].dropna().astype(str).head(200)
+        if sample.empty:
+            continue
+
+        parsed_sample = pd.to_datetime(
+            sample,
+            errors='coerce',
+            infer_datetime_format=True,
+            cache=True,
+        )
+        # Only coerce if the column is plausibly datetime to avoid noisy warnings
+        if parsed_sample.notna().mean() >= 0.6:
+            df[column] = pd.to_datetime(
+                df[column],
+                errors='coerce',
+                infer_datetime_format=True,
+                cache=True,
+            )
 
     return df
+
+
+def _analysis_subset(df: pd.DataFrame, max_rows: int = 20_000) -> pd.DataFrame:
+    """Return a representative sample to keep downstream analysis responsive."""
+
+    if len(df) <= max_rows:
+        return df
+    return df.sample(n=max_rows, random_state=42)
 
 
 def _load_dataframe(data_path: Path, max_rows: int = 150_000) -> pd.DataFrame:
@@ -284,6 +309,26 @@ def _generate_additional_insights(df: pd.DataFrame) -> dict[str, str]:
         if top_categories:
             insights['dominant categories'] = '; '.join(top_categories)
     return insights
+
+
+def _dataset_brief(df: pd.DataFrame) -> str:
+    """Return a concise, human-friendly dataset synopsis."""
+
+    parts = [f"{len(df):,} rows across {df.shape[1]} columns"]
+    numeric_cols = df.select_dtypes(include=['number']).columns
+    categorical_cols = df.select_dtypes(include=['object', 'category']).columns
+    datetime_cols = [col for col in df.columns if pd.api.types.is_datetime64_any_dtype(df[col])]
+
+    if len(numeric_cols) > 0:
+        parts.append(f"{len(numeric_cols)} numeric fields for trending and aggregation")
+    if len(categorical_cols) > 0:
+        parts.append(f"{len(categorical_cols)} categorical fields for grouping and filters")
+    if datetime_cols:
+        parts.append("time-based fields available for timelines")
+
+    if not parts:
+        return "Upload data to see a quick synopsis."
+    return "; ".join(parts)
 
 
 def _build_profile_charts(df: pd.DataFrame) -> dict[str, str]:
@@ -442,17 +487,46 @@ def generate_chart_suggestions(df, max_suggestions=10):
 
     # Rank and trim
     if not suggestions:
-        fallback_message = (
-            "No strong chart suggestions found. Try exploring columns manually "
-            "or adjust thresholds."
-        )
-        return [{
-            "title": fallback_message,
-            "chart_type": None,
-            "x": None,
-            "y": None,
-            "score": 0
-        }]
+        fallback_suggestions = []
+        if datetime_cols and numeric_cols:
+            fallback_suggestions.append({
+                "title": f"Trend of {numeric_cols[0]} over {datetime_cols[0]}",
+                "chart_type": "line",
+                "x": datetime_cols[0],
+                "y": numeric_cols[0],
+                "score": 0.3,
+            })
+        if numeric_cols:
+            fallback_suggestions.append({
+                "title": f"Distribution of {numeric_cols[0]}",
+                "chart_type": "histogram",
+                "x": numeric_cols[0],
+                "y": None,
+                "score": 0.25,
+            })
+        if categorical_cols and numeric_cols:
+            fallback_suggestions.append({
+                "title": f"Average {numeric_cols[0]} by {categorical_cols[0]}",
+                "chart_type": "bar",
+                "x": categorical_cols[0],
+                "y": numeric_cols[0],
+                "score": 0.2,
+            })
+
+        if fallback_suggestions:
+            suggestions = fallback_suggestions
+        else:
+            fallback_message = (
+                "No strong chart suggestions found. Try exploring columns manually "
+                "or adjust thresholds."
+            )
+            return [{
+                "title": fallback_message,
+                "chart_type": None,
+                "x": None,
+                "y": None,
+                "score": 0
+            }]
 
     suggestions = sorted(suggestions, key=lambda s: s["score"], reverse=True)
     return suggestions[:max_suggestions]
@@ -568,6 +642,7 @@ def dashboard():
     table_html = None
     columns: list[str] = []
     summary = None
+    dataset_synopsis = None
     suggestions = None
 
     if not filename and uploads:
@@ -588,12 +663,14 @@ def dashboard():
         if filepath.exists():
             try:
                 df = _load_dataframe(filepath)
+                analysis_df = _analysis_subset(df)
                 table_html, columns = _render_preview_table(df)
-                summary = _summarise_dataframe(df)
-                suggestions = generate_chart_suggestions(df)
-                profile_charts = _build_profile_charts(df)
-                quality_signals = _data_quality_signals(df)
-                extra_insights = _generate_additional_insights(df)
+                summary = _summarise_dataframe(analysis_df)
+                suggestions = generate_chart_suggestions(analysis_df)
+                profile_charts = _build_profile_charts(analysis_df)
+                quality_signals = _data_quality_signals(analysis_df)
+                extra_insights = _generate_additional_insights(analysis_df)
+                dataset_synopsis = _dataset_brief(analysis_df)
             except Exception as e:
                 flash(f"Error loading file '{filename}': {e}")
         else:
@@ -609,6 +686,7 @@ def dashboard():
         uploads=uploads,
         selected_file=filename,
         summary=summary,
+        dataset_synopsis=dataset_synopsis,
         suggestions=suggestions,
         profile_charts=profile_charts,
         quality_signals=quality_signals,
@@ -675,16 +753,17 @@ def upload():
     db.session.add(new_upload)
 
     try:
-        summary = _summarise_dataframe(df)
-        suggestions = generate_chart_suggestions(df)
+        analysis_df = _analysis_subset(df)
+        summary = _summarise_dataframe(analysis_df)
+        suggestions = generate_chart_suggestions(analysis_df)
         table_html, columns = _render_preview_table(df)
         db.session.commit()
-        _save_profile(new_upload, df)
+        _save_profile(new_upload, analysis_df)
         db.session.commit()
         drift = _schema_drift_message(
             session['user_id'],
             safe_name,
-            {col: str(dtype) for col, dtype in df.dtypes.items()},
+            {col: str(dtype) for col, dtype in analysis_df.dtypes.items()},
             exclude_upload_id=new_upload.id
         )
         if drift:
@@ -704,6 +783,8 @@ def upload():
 
     suggestions = suggestions or []
 
+    dataset_synopsis = _dataset_brief(analysis_df)
+
     return render_template(
         'dashboard.html',
         user=session['user'],
@@ -711,11 +792,12 @@ def upload():
         columns=columns,
         uploads=uploads,
         summary=summary,
+        dataset_synopsis=dataset_synopsis,
         selected_file=stored_name,
         suggestions=suggestions,
-        profile_charts=_build_profile_charts(df),
-        quality_signals=_data_quality_signals(df),
-        extra_insights=_generate_additional_insights(df),
+        profile_charts=_build_profile_charts(analysis_df),
+        quality_signals=_data_quality_signals(analysis_df),
+        extra_insights=_generate_additional_insights(analysis_df),
         saved_charts=(
             SavedChart.query
             .filter_by(user_id=session['user_id'])
@@ -833,9 +915,11 @@ def visualize():
             db.session.commit()
 
         # Update suggestions, preview, summary
-        suggestions = generate_chart_suggestions(df)
+        analysis_df = _analysis_subset(df)
+        suggestions = generate_chart_suggestions(analysis_df)
         table_html, columns = _render_preview_table(df)
-        summary = _summarise_dataframe(df)
+        summary = _summarise_dataframe(analysis_df)
+        dataset_synopsis = _dataset_brief(analysis_df)
 
         return render_template(
             'dashboard.html',
@@ -851,10 +935,11 @@ def visualize():
             selected_file=filename,
             chart=chart_html,
             summary=summary,
+            dataset_synopsis=dataset_synopsis,
             suggestions=suggestions,
-            profile_charts=_build_profile_charts(df),
-            quality_signals=_data_quality_signals(df),
-            extra_insights=_generate_additional_insights(df),
+            profile_charts=_build_profile_charts(analysis_df),
+            quality_signals=_data_quality_signals(analysis_df),
+            extra_insights=_generate_additional_insights(analysis_df),
             saved_charts=(
                 SavedChart.query
                 .filter_by(user_id=session['user_id'])

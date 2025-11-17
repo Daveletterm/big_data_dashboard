@@ -1,0 +1,55 @@
+:root {
+  --bg: radial-gradient(circle at 20% 20%, #f4f7fb 0, #e8ecf5 35%, #dfe7f1 70%, #d2dbeb 100%);
+  --card-shadow: 0 12px 30px rgba(15, 23, 42, 0.1);
+}
+
+body {
+  background: var(--bg);
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  color: #1f2933;
+}
+
+.auth-card {
+  background: #ffffff;
+  border-radius: 16px;
+  padding: 32px;
+  width: min(440px, 100%);
+  box-shadow: var(--card-shadow);
+  border: 1px solid #e5e7eb;
+}
+
+.brand-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: #0d6efd;
+}
+
+.helper-text {
+  color: #6b7280;
+}
+
+.btn-primary {
+  background: linear-gradient(135deg, #4f46e5, #0ea5e9);
+  border: none;
+}
+
+.btn-primary:hover {
+  filter: brightness(0.95);
+}
+
+.alt-link a {
+  color: #0d6efd;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.alt-link a:hover {
+  text-decoration: underline;
+}
