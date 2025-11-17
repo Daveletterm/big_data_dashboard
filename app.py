@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from flask import Flask, render_template, request, redirect, url_for, session, flash, abort
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
@@ -11,6 +13,7 @@ import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta
 
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.io as pio
@@ -201,10 +204,45 @@ def _data_quality_signals(df: pd.DataFrame) -> dict[str, str]:
 def _generate_additional_insights(df: pd.DataFrame) -> dict[str, str]:
     insights: dict[str, str] = {}
     dtypes = df.dtypes.apply(lambda x: str(x)).value_counts()
-    insights['types'] = ', '.join(f"{dtype}: {count}" for dtype, count in dtypes.items())
-    nulls = df.isnull().sum().sum()
-    if nulls:
-        insights['missing'] = f"Total missing values: {nulls}"
+    insights['dataset shape'] = f"{len(df):,} rows × {df.shape[1]} columns"
+    insights['column types'] = ', '.join(f"{dtype}: {count}" for dtype, count in dtypes.items())
+
+    null_counts = df.isnull().sum()
+    total_nulls = int(null_counts.sum())
+    if total_nulls:
+        percent_missing = 100 * total_nulls / (len(df) * max(len(df.columns), 1))
+        top_missing = (
+            null_counts[null_counts > 0]
+            .sort_values(ascending=False)
+            .head(3)
+            .apply(lambda c: f"{c} ({c / len(df):.1%})")
+        )
+        top_missing_str = ', '.join(f"{col}: {val}" for col, val in top_missing.items())
+        insights['missing data'] = (
+            f"{total_nulls:,} missing values (~{percent_missing:.1f}% of the dataset); "
+            f"top gaps in {top_missing_str}"
+        )
+
+    numeric_cols = df.select_dtypes(include=['number'])
+    if numeric_cols.shape[1] >= 2:
+        corr = numeric_cols.corr().abs()
+        mask = corr.where(~np.tril(np.ones(corr.shape)).astype(bool))
+        stacked = mask.stack()
+        strong = stacked[stacked >= 0.65].sort_values(ascending=False).head(3)
+        if not strong.empty:
+            pairs = ', '.join(f"{a} vs {b} (ρ={val:.2f})" for (a, b), val in strong.items())
+            insights['strong relationships'] = f"Notable correlations: {pairs}"
+
+    categorical_cols = df.select_dtypes(include=['object', 'category'])
+    if not categorical_cols.empty:
+        top_categories: list[str] = []
+        for col in categorical_cols.columns[:3]:
+            freq = categorical_cols[col].value_counts(dropna=True)
+            if not freq.empty:
+                top = freq.iloc[0]
+                top_categories.append(f"{col}: '{freq.index[0]}' appears {top} times ({top / len(df):.1%})")
+        if top_categories:
+            insights['dominant categories'] = '; '.join(top_categories)
     return insights
 
 
@@ -784,9 +822,9 @@ def delete_file():
     upload = Upload.query.filter_by(user_id=session['user_id'], filename=filename).first()
     display_name = upload.original_filename if upload else filename
     if upload:
-        db.session.delete(upload)
         DatasetProfile.query.filter_by(upload_id=upload.id).delete()
         SavedChart.query.filter_by(upload_id=upload.id).delete()
+        db.session.delete(upload)
         db.session.commit()
 
     # Find the next most recent file, if any

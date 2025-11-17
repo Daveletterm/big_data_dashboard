@@ -75,6 +75,7 @@
           </h2>
           <div id="collapseInsights" class="accordion-collapse collapse show">
             <div class="accordion-body">
+              <p class="text-muted">Quick, plain‑English highlights for every column and the dataset as a whole.</p>
               <ul class="list-group">
                 {% for col, insight in summary.items() %}
                   <li class="list-group-item"><strong>{{ col }}</strong>: {{ insight }}</li>
@@ -82,16 +83,17 @@
               </ul>
               {% if extra_insights %}
                 <div class="mt-3">
-                  <h6>Dataset overview</h6>
+                  <h6 class="mb-1">Dataset overview</h6>
                   <ul class="list-unstyled mb-0">
                     {% for key, val in extra_insights.items() %}
-                      <li><strong>{{ key|capitalize }}:</strong> {{ val }}</li>
+                      <li class="mb-1"><strong>{{ key|capitalize }}:</strong> {{ val }}</li>
                     {% endfor %}
                   </ul>
                 </div>
               {% endif %}
               {% if quality_signals %}
                 <div class="alert alert-warning mt-3">
+                  <div class="fw-semibold mb-1">Data quality watchouts</div>
                   {% for key, msg in quality_signals.items() %}
                     <div><strong>{{ key|capitalize }}:</strong> {{ msg }}</div>
                   {% endfor %}
@@ -261,9 +263,11 @@
         <div class="mt-4">
           <h5>Data Health Visuals</h5>
           {% if profile_charts.get('correlation') %}
+            <p class="text-muted small">Correlation matrix: dark squares highlight numeric columns that move together. Values near ±1 indicate strong positive or negative relationships worth charting.</p>
             <div class="mb-3">{{ profile_charts.get('correlation')|safe }}</div>
           {% endif %}
           {% if profile_charts.get('nulls') %}
+            <p class="text-muted small">Null heatmap: red bars show where values are missing. Large red blocks suggest data gaps that could bias charts.</p>
             <div class="mb-3">{{ profile_charts.get('nulls')|safe }}</div>
           {% endif %}
         </div>
