@@ -1,0 +1,78 @@
+:root {
+  --bg: radial-gradient(circle at 25% 20%, #f7fbff 0, #edf4ff 35%, #e8f0ff 60%, #e3eaf7 100%);
+  --card-shadow: 0 12px 30px rgba(15, 23, 42, 0.12);
+  --accent: linear-gradient(135deg, #4f46e5, #0ea5e9);
+}
+
+body {
+  background: var(--bg);
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  color: #1f2933;
+}
+
+.auth-card {
+  background: #ffffff;
+  border-radius: 16px;
+  padding: 32px;
+  width: min(440px, 100%);
+  box-shadow: var(--card-shadow);
+  border: 1px solid #e5e7eb;
+  position: relative;
+  overflow: hidden;
+}
+
+.brand-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: #0d6efd;
+}
+
+.helper-text {
+  color: #6b7280;
+}
+
+.btn-primary {
+  background: var(--accent);
+  border: none;
+}
+
+.btn-primary:hover {
+  filter: brightness(0.95);
+}
+
+.auth-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  height: 8px;
+  background: var(--accent);
+}
+
+.accent-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: rgba(79, 70, 229, 0.1);
+  color: #4338ca;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.alt-link a {
+  color: #0d6efd;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.alt-link a:hover {
+  text-decoration: underline;
+}
