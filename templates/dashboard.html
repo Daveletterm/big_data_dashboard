@@ -3,10 +3,35 @@
 <head>
   <meta charset="UTF-8" />
   <title>Big Data Dashboard</title>
+  <style>
+    :root {
+      --bg-color: #f8f9fb;
+      --card-bg: #ffffff;
+      --text-color: #1f2933;
+      --muted-color: #6c7a89;
+      --border-color: #e5e7eb;
+      --accent: #0d6efd;
+    }
+
+    [data-theme="dark"] {
+      --bg-color: #0f172a;
+      --card-bg: #111827;
+      --text-color: #e5e7eb;
+      --muted-color: #9ca3af;
+      --border-color: #1f2937;
+      --accent: #60a5fa;
+    }
+
+    body {
+      background: var(--bg-color);
+      color: var(--text-color);
+    }
+  </style>
   <script>
     (() => {
       const stored = localStorage.getItem("theme-preference") || "light";
       document.documentElement.setAttribute("data-theme", stored);
+      document.documentElement.style.colorScheme = stored;
     })();
   </script>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
