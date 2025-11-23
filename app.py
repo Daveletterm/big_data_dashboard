@@ -182,6 +182,49 @@ def _analysis_subset(df: pd.DataFrame, max_rows: int = 20_000) -> pd.DataFrame:
     return df.sample(n=max_rows, random_state=42)
 
 
+TRADING_CORE_COLUMNS = {
+    'row_type',
+    'symbol',
+    'asset_class',
+    'qty',
+    'avg_entry_price',
+    'current_price',
+    'market_value',
+    'unrealized_pl',
+    'unrealized_plpc',
+}
+
+TRADING_OPTIONAL_COLUMNS = {
+    'mode_or_strategy',
+    'strategy_name',
+    'realized_pl',
+    'realized_plpc',
+}
+
+
+def classify_dataset(df: pd.DataFrame) -> str:
+    """Classify the dataset to switch between generic and trading views."""
+
+    lowered = {col.lower() for col in df.columns}
+    if TRADING_CORE_COLUMNS.issubset(lowered):
+        return "trading_paper_trades"
+    return "generic"
+
+
+def split_trading_frames(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Split a trading CSV into account, position, and trade frames."""
+
+    if 'row_type' not in df.columns:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    normalized = df.copy()
+    normalized['row_type'] = normalized['row_type'].astype(str).str.lower()
+    account_df = normalized[normalized['row_type'] == 'account_summary'].copy()
+    positions_df = normalized[normalized['row_type'] == 'position'].copy()
+    trades_df = normalized[normalized['row_type'] == 'trade'].copy()
+    return account_df, positions_df, trades_df
+
+
 def _load_dataframe(data_path: Path, max_rows: int = 150_000) -> pd.DataFrame:
     """Load a CSV or Excel file into a cleaned dataframe with limits and streaming."""
 
@@ -331,23 +374,295 @@ def _dataset_brief(df: pd.DataFrame) -> str:
     return "; ".join(parts)
 
 
-def _build_profile_charts(df: pd.DataFrame) -> dict[str, str]:
-    charts: dict[str, str] = {}
+def _chart_payload(title: str, description: str, fig) -> dict[str, str]:
+    return {
+        'title': title,
+        'description': description,
+        'html': fig.to_html(full_html=False),
+    }
+
+
+def _build_trading_visuals(df: pd.DataFrame) -> tuple[list[dict[str, str]], list[dict[str, str]], list[str]]:
+    """Construct trading-specific visuals and supporting data health charts."""
+
+    trading_charts: list[dict[str, str]] = []
+    chart_notes: list[str] = []
+    account_df, positions_df, trades_df = split_trading_frames(df)
+
+    # Equity curve
+    if not account_df.empty:
+        value_col = None
+        if 'equity' in account_df.columns:
+            value_col = 'equity'
+        elif 'portfolio_value' in account_df.columns:
+            value_col = 'portfolio_value'
+
+        if value_col and 'timestamp' in account_df.columns:
+            account_df = account_df.copy()
+            account_df['timestamp'] = pd.to_datetime(account_df['timestamp'], errors='coerce')
+            account_df = account_df.dropna(subset=['timestamp', value_col]).sort_values('timestamp')
+            if not account_df.empty:
+                fig_equity = px.line(
+                    account_df,
+                    x='timestamp',
+                    y=value_col,
+                    title='Equity over time',
+                )
+                fig_equity.update_layout(yaxis_title='Equity' if value_col == 'equity' else 'Portfolio value')
+                trading_charts.append(
+                    _chart_payload(
+                        'Equity over time',
+                        'Tracks account equity based on account_summary rows in the CSV.',
+                        fig_equity,
+                    )
+                )
+            else:
+                chart_notes.append('Skipped equity curve: timestamp or equity values were missing after cleaning.')
+        else:
+            chart_notes.append("Skipped equity curve: required columns 'timestamp' and 'equity'/'portfolio_value' not found.")
+
+    # Open positions overview
+    if not positions_df.empty:
+        positions_df = positions_df.copy()
+        if 'market_value' in positions_df.columns:
+            positions_df['market_value'] = pd.to_numeric(positions_df['market_value'], errors='coerce')
+        else:
+            positions_df['market_value'] = np.nan
+        if 'unrealized_pl' in positions_df.columns:
+            positions_df['unrealized_pl'] = pd.to_numeric(positions_df['unrealized_pl'], errors='coerce')
+        top_positions = positions_df.sort_values('market_value', ascending=False).head(20)
+        if 'symbol' in top_positions.columns and top_positions['market_value'].notna().any():
+            fig_positions = px.bar(
+                top_positions,
+                x='symbol',
+                y='market_value',
+                title='Open positions by market value',
+                hover_data=['asset_class', 'qty', 'avg_entry_price', 'current_price', 'unrealized_pl', 'unrealized_plpc'],
+            )
+            fig_positions.update_layout(yaxis_title='Market value', xaxis_title='Symbol')
+            trading_charts.append(
+                _chart_payload(
+                    'Open positions by market value',
+                    'Shows where capital is allocated right now, sorted by position size.',
+                    fig_positions,
+                )
+            )
+        else:
+            chart_notes.append('Skipped positions overview: missing symbol or market_value data.')
+
+        if top_positions['unrealized_pl'].notna().any():
+            fig_unrealized = px.bar(
+                top_positions.sort_values('unrealized_pl', ascending=False),
+                x='symbol',
+                y='unrealized_pl',
+                title='Unrealized P/L by symbol',
+                color='unrealized_pl',
+                color_continuous_scale='RdYlGn',
+            )
+            fig_unrealized.update_layout(yaxis_title='Unrealized P/L', xaxis_title='Symbol', coloraxis_showscale=False)
+            trading_charts.append(
+                _chart_payload(
+                    'Unrealized P/L by symbol',
+                    'Highlights winners and losers among open positions using unrealized profit/loss.',
+                    fig_unrealized,
+                )
+            )
+    else:
+        chart_notes.append('Skipped positions overview: no position rows detected.')
+
+    # Strategy performance breakdown
+    if not trades_df.empty:
+        trades_df = trades_df.copy()
+        if 'realized_pl' in trades_df.columns:
+            trades_df['realized_pl'] = pd.to_numeric(trades_df['realized_pl'], errors='coerce')
+        strategy_field = 'strategy_name' if 'strategy_name' in trades_df.columns else 'mode_or_strategy'
+
+        if strategy_field in trades_df.columns:
+            grouped = trades_df.groupby(strategy_field)
+            aggregated = grouped['realized_pl'].agg(['sum', 'count', 'mean']) if 'realized_pl' in trades_df.columns else None
+            if aggregated is not None and aggregated['sum'].notna().any():
+                aggregated = aggregated.rename(columns={'sum': 'total_realized_pl', 'count': 'trade_count', 'mean': 'avg_realized_pl'})
+                fig_strategy = px.bar(
+                    aggregated.reset_index(),
+                    x=strategy_field,
+                    y='total_realized_pl',
+                    title='Strategy performance (realized P/L)',
+                    hover_data=['trade_count', 'avg_realized_pl'],
+                )
+                fig_strategy.update_layout(yaxis_title='Total realized P/L', xaxis_title='Strategy')
+                trading_charts.append(
+                    _chart_payload(
+                        'Strategy performance (realized P/L)',
+                        'Aggregates realized profit and trade count per strategy or mode to reveal what is working.',
+                        fig_strategy,
+                    )
+                )
+            else:
+                volume = grouped.size().reset_index(name='trade_count')
+                fig_volume = px.bar(
+                    volume,
+                    x=strategy_field,
+                    y='trade_count',
+                    title='Trade volume by strategy',
+                )
+                fig_volume.update_layout(yaxis_title='Trade count', xaxis_title='Strategy')
+                trading_charts.append(
+                    _chart_payload(
+                        'Trade volume by strategy',
+                        'Counts trades per strategy when realized profit/loss is unavailable.',
+                        fig_volume,
+                    )
+                )
+        else:
+            chart_notes.append('Skipped strategy performance: no strategy identifiers found.')
+
+        # Symbol performance
+        trades_df['symbol'] = trades_df.get('symbol')
+        if 'symbol' in trades_df.columns:
+            symbol_grouped = trades_df.groupby('symbol')
+            symbol_perf = symbol_grouped['realized_pl'].agg(['sum', 'count']) if 'realized_pl' in trades_df.columns else None
+            if symbol_perf is not None and symbol_perf['sum'].notna().any():
+                symbol_perf = symbol_perf.rename(columns={'sum': 'total_realized_pl', 'count': 'trade_count'})
+                top_symbols = symbol_perf.reindex(symbol_perf['total_realized_pl'].abs().sort_values(ascending=False).head(20).index)
+                fig_symbol = px.bar(
+                    top_symbols.reset_index(),
+                    x='symbol',
+                    y='total_realized_pl',
+                    title='Symbol performance (realized P/L)',
+                    color='total_realized_pl',
+                    color_continuous_scale='RdYlGn',
+                )
+                fig_symbol.update_layout(yaxis_title='Total realized P/L', xaxis_title='Symbol', coloraxis_showscale=False)
+                trading_charts.append(
+                    _chart_payload(
+                        'Symbol performance (realized P/L)',
+                        'Ranks symbols by realized profit/loss to spotlight the biggest contributors.',
+                        fig_symbol,
+                    )
+                )
+            else:
+                trade_counts = symbol_grouped.size().reset_index(name='trade_count')
+                fig_symbol_volume = px.bar(
+                    trade_counts.sort_values('trade_count', ascending=False).head(20),
+                    x='symbol',
+                    y='trade_count',
+                    title='Trade volume by symbol',
+                )
+                fig_symbol_volume.update_layout(yaxis_title='Trade count', xaxis_title='Symbol')
+                trading_charts.append(
+                    _chart_payload(
+                        'Trade volume by symbol',
+                        'Counts trades per symbol when realized profit/loss is unavailable.',
+                        fig_symbol_volume,
+                    )
+                )
+        else:
+            chart_notes.append('Skipped symbol performance: symbol column not found in trades.')
+
+        # Trade timeline
+        if 'timestamp' in trades_df.columns and 'side' in trades_df.columns:
+            price_candidates = [
+                col for col in ['filled_avg_price', 'avg_entry_price', 'current_price'] if col in trades_df.columns
+            ]
+            price_col = price_candidates[0] if price_candidates else None
+            trades_df['timestamp'] = pd.to_datetime(trades_df['timestamp'], errors='coerce')
+            if price_col:
+                timeline_df = trades_df.dropna(subset=['timestamp', price_col, 'side']).sort_values('timestamp')
+                if not timeline_df.empty:
+                    fig_timeline = px.scatter(
+                        timeline_df,
+                        x='timestamp',
+                        y=price_col,
+                        color='side',
+                        title='Trade timeline',
+                        symbol='side',
+                        hover_data=['symbol', 'qty', price_col],
+                    )
+                    fig_timeline.update_layout(xaxis_title='Timestamp', yaxis_title=price_col.replace('_', ' ').title())
+                    trading_charts.append(
+                        _chart_payload(
+                            'Trade timeline',
+                            'Plots trade timestamps and prices to reveal entry/exit timing by side.',
+                            fig_timeline,
+                        )
+                    )
+                else:
+                    chart_notes.append('Skipped trade timeline: missing timestamp or price data after cleaning.')
+            else:
+                chart_notes.append('Skipped trade timeline: no price column (filled_avg_price/avg_entry_price/current_price) available.')
+        else:
+            chart_notes.append("Skipped trade timeline: required columns 'timestamp' and 'side' not found.")
+    else:
+        chart_notes.append('Skipped trading visuals: no trade rows detected.')
+
+    data_health_charts, health_notes = _build_data_health_charts(df, 'trading_paper_trades')
+    chart_notes.extend(health_notes)
+    return trading_charts, data_health_charts, chart_notes
+
+
+def _build_generic_visuals(df: pd.DataFrame) -> tuple[list[dict[str, str]], list[str]]:
+    charts, notes = _build_data_health_charts(df, 'generic')
+    return charts, notes
+
+
+def _prepare_visual_context(df: pd.DataFrame) -> tuple[str, list[dict[str, str]], list[dict[str, str]], list[str]]:
+    dataset_type = classify_dataset(df)
+    if dataset_type == 'trading_paper_trades':
+        trading_charts, data_health_charts, chart_notes = _build_trading_visuals(df)
+    else:
+        trading_charts = []
+        data_health_charts, chart_notes = _build_generic_visuals(df)
+    return dataset_type, trading_charts, data_health_charts, chart_notes
+
+
+def _build_data_health_charts(df: pd.DataFrame, dataset_type: str) -> tuple[list[dict[str, str]], list[str]]:
+    charts: list[dict[str, str]] = []
+    notes: list[str] = []
     numeric_cols = df.select_dtypes(include=['number'])
-    if numeric_cols.shape[1] >= 2:
+
+    corr_condition = (
+        numeric_cols.shape[1] >= 3 and len(df) > 10
+        if dataset_type == 'trading_paper_trades'
+        else numeric_cols.shape[1] >= 2
+    )
+    if corr_condition:
         corr = numeric_cols.corr().fillna(0)
-        fig_corr = px.imshow(corr, text_auto='.2f', color_continuous_scale='Blues', title='Correlation matrix')
-        charts['correlation'] = fig_corr.to_html(full_html=False)
+        fig_corr = px.imshow(
+            corr,
+            text_auto='.2f',
+            color_continuous_scale='Blues',
+            title='Correlation matrix of numeric columns',
+            labels={'color': 'Correlation'}
+        )
+        charts.append(
+            _chart_payload(
+                'Correlation matrix of numeric columns',
+                'Shows how numeric fields move together; strong values hint at drivers of performance or redundant fields.',
+                fig_corr,
+            )
+        )
+    else:
+        notes.append('Skipped correlation matrix: insufficient numeric columns or rows to compute reliable correlations.')
+
     null_matrix = df.isnull()
     if null_matrix.values.any():
         fig_null = px.imshow(
             null_matrix.astype(int),
             color_continuous_scale=[[0, 'rgb(0,123,255)'], [1, 'rgb(220,53,69)']],
-            title='Null heatmap',
+            title='Null heatmap by column',
             labels={'color': 'Null (1=yes)'}
         )
-        charts['nulls'] = fig_null.to_html(full_html=False)
-    return charts
+        charts.append(
+            _chart_payload(
+                'Null heatmap by column',
+                'Highlights where values are missing so you can judge data reliability before charting.',
+                fig_null,
+            )
+        )
+    else:
+        notes.append('Skipped null heatmap: no missing values detected.')
+
+    return charts, notes
 
 
 def _render_preview_table(df: pd.DataFrame) -> tuple[str, list[str]]:
@@ -648,7 +963,10 @@ def dashboard():
     if not filename and uploads:
         filename = uploads[0].filename
 
-    profile_charts = {}
+    dataset_type = 'generic'
+    trading_charts: list[dict[str, str]] = []
+    data_health_charts: list[dict[str, str]] = []
+    chart_notes: list[str] = []
     quality_signals = {}
     extra_insights = {}
     saved_charts = (
@@ -667,7 +985,7 @@ def dashboard():
                 table_html, columns = _render_preview_table(df)
                 summary = _summarise_dataframe(analysis_df)
                 suggestions = generate_chart_suggestions(analysis_df)
-                profile_charts = _build_profile_charts(analysis_df)
+                dataset_type, trading_charts, data_health_charts, chart_notes = _prepare_visual_context(analysis_df)
                 quality_signals = _data_quality_signals(analysis_df)
                 extra_insights = _generate_additional_insights(analysis_df)
                 dataset_synopsis = _dataset_brief(analysis_df)
@@ -688,7 +1006,10 @@ def dashboard():
         summary=summary,
         dataset_synopsis=dataset_synopsis,
         suggestions=suggestions,
-        profile_charts=profile_charts,
+        dataset_type=dataset_type,
+        trading_charts=trading_charts,
+        data_health_charts=data_health_charts,
+        chart_notes=chart_notes,
         quality_signals=quality_signals,
         extra_insights=extra_insights,
         saved_charts=saved_charts
@@ -756,6 +1077,7 @@ def upload():
         analysis_df = _analysis_subset(df)
         summary = _summarise_dataframe(analysis_df)
         suggestions = generate_chart_suggestions(analysis_df)
+        dataset_type, trading_charts, data_health_charts, chart_notes = _prepare_visual_context(analysis_df)
         table_html, columns = _render_preview_table(df)
         db.session.commit()
         _save_profile(new_upload, analysis_df)
@@ -795,7 +1117,10 @@ def upload():
         dataset_synopsis=dataset_synopsis,
         selected_file=stored_name,
         suggestions=suggestions,
-        profile_charts=_build_profile_charts(analysis_df),
+        dataset_type=dataset_type,
+        trading_charts=trading_charts,
+        data_health_charts=data_health_charts,
+        chart_notes=chart_notes,
         quality_signals=_data_quality_signals(analysis_df),
         extra_insights=_generate_additional_insights(analysis_df),
         saved_charts=(
@@ -917,6 +1242,7 @@ def visualize():
         # Update suggestions, preview, summary
         analysis_df = _analysis_subset(df)
         suggestions = generate_chart_suggestions(analysis_df)
+        dataset_type, trading_charts, data_health_charts, chart_notes = _prepare_visual_context(analysis_df)
         table_html, columns = _render_preview_table(df)
         summary = _summarise_dataframe(analysis_df)
         dataset_synopsis = _dataset_brief(analysis_df)
@@ -937,7 +1263,10 @@ def visualize():
             summary=summary,
             dataset_synopsis=dataset_synopsis,
             suggestions=suggestions,
-            profile_charts=_build_profile_charts(analysis_df),
+            dataset_type=dataset_type,
+            trading_charts=trading_charts,
+            data_health_charts=data_health_charts,
+            chart_notes=chart_notes,
             quality_signals=_data_quality_signals(analysis_df),
             extra_insights=_generate_additional_insights(analysis_df),
             saved_charts=(
