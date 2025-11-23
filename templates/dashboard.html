@@ -305,19 +305,51 @@
         {{ chart|safe }}
       {% endif %}
 
-      {% if profile_charts %}
+      {% if dataset_type == 'trading_paper_trades' %}
         <div class="mt-4">
-          <h5>Data Health Visuals</h5>
-          {% if profile_charts.get('correlation') %}
-            <p class="text-muted small">Correlation matrix: dark squares highlight numeric columns that move together. Values near ±1 indicate strong positive or negative relationships worth charting.</p>
-            <div class="mb-3">{{ profile_charts.get('correlation')|safe }}</div>
-          {% endif %}
-          {% if profile_charts.get('nulls') %}
-            <p class="text-muted small">Null heatmap: red bars show where values are missing. Large red blocks suggest data gaps that could bias charts.</p>
-            <div class="mb-3">{{ profile_charts.get('nulls')|safe }}</div>
+          <h5>Trading insights</h5>
+          <p class="text-muted small">Automatic views tailored for the Stock_Analysis_App CSVs to explain positions, strategies, and trade timing.</p>
+          {% if trading_charts %}
+            {% for viz in trading_charts %}
+              <div class="mb-4">
+                <div class="d-flex align-items-center justify-content-between">
+                  <h6 class="mb-1">{{ viz.title }}</h6>
+                </div>
+                <p class="text-muted small mb-2">{{ viz.description }}</p>
+                <div class="border rounded p-2">{{ viz.html|safe }}</div>
+              </div>
+            {% endfor %}
+          {% else %}
+            <p class="text-muted small">No trading-specific visuals could be generated for this file.</p>
           {% endif %}
         </div>
       {% endif %}
+
+      <div class="mt-4">
+        <h5>Data health</h5>
+        <p class="text-muted small">These charts highlight missing data and relationships between numeric columns to help spot data issues.</p>
+        {% if data_health_charts %}
+          {% for viz in data_health_charts %}
+            <div class="mb-4">
+              <h6 class="mb-1">{{ viz.title }}</h6>
+              <p class="text-muted small mb-2">{{ viz.description }}</p>
+              <div class="border rounded p-2">{{ viz.html|safe }}</div>
+            </div>
+          {% endfor %}
+        {% else %}
+          <p class="text-muted small">No data health visuals were generated for this dataset.</p>
+        {% endif %}
+        {% if chart_notes %}
+          <div class="alert alert-secondary">
+            <div class="fw-semibold">Generation notes</div>
+            <ul class="mb-0">
+              {% for note in chart_notes %}
+                <li>{{ note }}</li>
+              {% endfor %}
+            </ul>
+          </div>
+        {% endif %}
+      </div>
 
       {% if saved_charts %}
         <div class="mt-4">
