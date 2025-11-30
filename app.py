@@ -17,9 +17,11 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.io as pio
+from plotly.io import to_html
 import json
 
 pio.renderers.default = 'iframe'
+pio.templates.default = "plotly_white"
 
 # Load .env file if available
 load_dotenv()
@@ -141,6 +143,20 @@ def _enforce_dataframe_limits(df: pd.DataFrame, max_rows: int = 150_000, max_col
     return df
 
 
+def _ensure_unique_columns(columns) -> list[str]:
+    seen: dict[str, int] = {}
+    unique_cols: list[str] = []
+    for col in columns:
+        base = col
+        if base in seen:
+            seen[base] += 1
+            col = f"{base}_{seen[base]}"
+        else:
+            seen[base] = 0
+        unique_cols.append(col)
+    return unique_cols
+
+
 def _coerce_datetime_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Coerce obvious datetime columns into datetime64 with safeguards."""
 
@@ -159,16 +175,16 @@ def _coerce_datetime_columns(df: pd.DataFrame) -> pd.DataFrame:
         parsed_sample = pd.to_datetime(
             sample,
             errors='coerce',
-            infer_datetime_format=True,
             cache=True,
+            utc=True,
         )
         # Only coerce if the column is plausibly datetime to avoid noisy warnings
         if parsed_sample.notna().mean() >= 0.6:
             df[column] = pd.to_datetime(
                 df[column],
                 errors='coerce',
-                infer_datetime_format=True,
                 cache=True,
+                utc=True,
             )
 
     return df
@@ -180,6 +196,258 @@ def _analysis_subset(df: pd.DataFrame, max_rows: int = 20_000) -> pd.DataFrame:
     if len(df) <= max_rows:
         return df
     return df.sample(n=max_rows, random_state=42)
+
+
+def infer_column_roles(df: pd.DataFrame) -> dict:
+    """
+    Inspect df and classify columns into semantic roles:
+
+    - "time": true datetime columns.
+    - "year": numeric columns with all 4-digit integers in [1800, 2100].
+    - "metric": numeric columns with many distinct values (e.g. > 10).
+    - "numeric_category": numeric columns with low cardinality (e.g. 2–20 unique values).
+    - "category": string/object columns with low cardinality (2–50 unique values).
+    - "id": high-cardinality string columns (likely identifiers).
+    """
+    roles = {
+        "time": [],
+        "year": [],
+        "metric": [],
+        "numeric_category": [],
+        "category": [],
+        "id": [],
+        "dtypes": {},
+        "cardinalities": {},
+    }
+
+    for col in df.columns:
+        series = df[col]
+        roles["dtypes"][col] = str(series.dtype)
+        card = int(series.nunique(dropna=True))
+        roles["cardinalities"][col] = card
+
+        if pd.api.types.is_datetime64_any_dtype(series):
+            roles["time"].append(col)
+            continue
+
+        if pd.api.types.is_numeric_dtype(series):
+            numeric_series = pd.to_numeric(series, errors='coerce').dropna()
+            if numeric_series.empty:
+                continue
+            is_int_like = numeric_series.round().eq(numeric_series).all()
+            if is_int_like and numeric_series.between(1800, 2100).all() and numeric_series.nunique() >= 2:
+                roles["year"].append(col)
+                continue
+            unique_numeric = numeric_series.nunique()
+            if unique_numeric >= 10:
+                roles["metric"].append(col)
+            elif 2 <= unique_numeric <= 20:
+                roles["numeric_category"].append(col)
+            continue
+
+        if series.dtype == 'object' or series.dtype.name == 'string':
+            if 2 <= card <= 50:
+                roles["category"].append(col)
+            elif card > 50:
+                roles["id"].append(col)
+
+    return roles
+
+
+def build_tableau_overview(df: pd.DataFrame) -> tuple[dict, list[str], list[str]]:
+    """Construct a smarter overview profile, headline insights, and charts."""
+
+    roles = infer_column_roles(df)
+    numeric_series_map: dict[str, pd.Series] = {}
+    for col in df.columns:
+        series = pd.to_numeric(df[col], errors='coerce')
+        if series.notna().sum() > 0:
+            numeric_series_map[col] = series
+    metric_cols = [c for c in roles["metric"] if c in numeric_series_map]
+    category_cols = roles["category"] + roles["numeric_category"]
+    time_cols = roles["time"]
+    year_cols = roles["year"]
+
+    primary_time_col = None
+    if time_cols:
+        primary_time_col = time_cols[0]
+    elif year_cols:
+        primary_time_col = year_cols[0]
+
+    time_start = time_end = None
+    if primary_time_col:
+        if primary_time_col in year_cols:
+            time_series = pd.to_datetime(pd.to_numeric(df[primary_time_col], errors='coerce'), format='%Y', errors='coerce', utc=True)
+        else:
+            time_series = pd.to_datetime(df[primary_time_col], errors='coerce', utc=True)
+        time_series = time_series.dropna()
+        if not time_series.empty:
+            time_start = time_series.min()
+            time_end = time_series.max()
+
+    num_numeric = len(df.select_dtypes(include=['number']).columns)
+    num_datetime = len(time_cols) + len(year_cols)
+    num_categorical = len(category_cols)
+
+    inferred_type = "unknown"
+    if primary_time_col and metric_cols:
+        inferred_type = "time-series"
+    elif len(metric_cols) >= 2:
+        inferred_type = "numeric-matrix"
+    elif metric_cols and category_cols:
+        inferred_type = "categorical-metric"
+    elif category_cols:
+        inferred_type = "categorical"
+
+    dataset_summary = {
+        "row_count": len(df),
+        "col_count": len(df.columns),
+        "num_numeric": num_numeric,
+        "num_datetime": num_datetime,
+        "num_categorical": num_categorical,
+        "primary_time_col": primary_time_col,
+        "time_start": time_start,
+        "time_end": time_end,
+        "inferred_dataset_type": inferred_type,
+        "roles": roles,
+    }
+
+    overview_insights: list[str] = []
+    if category_cols:
+        cat = category_cols[0]
+        vc = df[cat].value_counts(dropna=True)
+        if not vc.empty:
+            top_cat = vc.index[0]
+            overview_insights.append(f"Most common category in {cat} is '{top_cat}' ({int(vc.iloc[0])} rows).")
+
+    if metric_cols:
+        ranges: dict[str, float] = {}
+        for col in metric_cols:
+            series = numeric_series_map.get(col, pd.Series(dtype=float)).dropna()
+            if series.empty:
+                continue
+            ranges[col] = float(series.max() - series.min())
+        if ranges:
+            top_metric = max(ranges, key=ranges.get)
+            overview_insights.append(f"Most volatile metric is {top_metric} (range {ranges[top_metric]:.2f}).")
+
+    if len(metric_cols) >= 2:
+        corr_df = pd.DataFrame({col: numeric_series_map[col] for col in metric_cols})
+        corr = corr_df.corr()
+        if not corr.empty:
+            corr_values = corr.abs()
+            mask = corr_values.where(~np.eye(corr_values.shape[0], dtype=bool))
+            strongest = mask.stack().sort_values(ascending=False)
+            if not strongest.empty:
+                (m1, m2), val = strongest.iloc[0]
+                overview_insights.append(f"Strongest correlation: {m1} vs {m2} (r = {val:.2f}).")
+
+    overview_charts_html: list[str] = []
+
+    def _style_and_render(fig) -> None:
+        fig.update_layout(
+            margin=dict(l=40, r=20, t=60, b=40),
+            title_x=0.0,
+            font=dict(size=14)
+        )
+        overview_charts_html.append(to_html(fig, full_html=False, include_plotlyjs=False))
+
+    if primary_time_col and metric_cols:
+        time_df = df.copy()
+        if primary_time_col in year_cols:
+            time_df[primary_time_col] = pd.to_datetime(pd.to_numeric(time_df[primary_time_col], errors='coerce'), format='%Y', errors='coerce', utc=True)
+        else:
+            time_df[primary_time_col] = pd.to_datetime(time_df[primary_time_col], errors='coerce', utc=True)
+        time_df = time_df.dropna(subset=[primary_time_col]).sort_values(primary_time_col)
+        if not time_df.empty:
+            metric_var = {
+                col: numeric_series_map[col].loc[time_df.index].var(skipna=True) if col in numeric_series_map else -np.inf
+                for col in metric_cols
+            }
+            top_metrics = [
+                col for col, _ in sorted(
+                    metric_var.items(),
+                    key=lambda item: (item[1] if pd.notna(item[1]) else -np.inf),
+                    reverse=True,
+                )
+                if pd.notna(metric_var.get(col, np.nan)) and metric_var.get(col, -np.inf) > -np.inf
+            ][:3]
+            for col in top_metrics:
+                if col in numeric_series_map:
+                    time_df[col] = numeric_series_map[col]
+            if top_metrics:
+                fig_line = px.line(
+                    time_df,
+                    x=primary_time_col,
+                    y=top_metrics,
+                    title="Key metrics over time",
+                )
+                _style_and_render(fig_line)
+
+                if category_cols and top_metrics:
+                    cat = category_cols[0]
+                    temp_df = time_df[[primary_time_col, cat] + top_metrics].dropna(subset=[cat])
+                    if not temp_df.empty:
+                        melt_df = temp_df.melt(id_vars=[primary_time_col, cat], value_vars=top_metrics, var_name="Metric", value_name="Value")
+                        grouped = melt_df.groupby([cat, "Metric"])["Value"].mean().reset_index()
+                        if not grouped.empty:
+                            fig_cat = px.bar(
+                                grouped,
+                                x=cat,
+                                y="Value",
+                                color="Metric",
+                                title="Average metrics by category",
+                            )
+                            _style_and_render(fig_cat)
+    elif len(metric_cols) >= 2:
+        corr_df = pd.DataFrame({col: numeric_series_map[col] for col in metric_cols})
+        corr = corr_df.corr().fillna(0)
+        fig_corr = px.imshow(
+            corr,
+            text_auto='.2f',
+            color_continuous_scale='Blues',
+            title='Correlation matrix of metrics',
+            labels={'color': 'Correlation'}
+        )
+        _style_and_render(fig_corr)
+
+        metric_var = {col: numeric_series_map[col].var(skipna=True) for col in metric_cols}
+        primary_metric = max(metric_var, key=lambda c: (metric_var[c] if not pd.isna(metric_var[c]) else -np.inf), default=None)
+        if primary_metric and not pd.isna(metric_var.get(primary_metric, np.nan)):
+            series = numeric_series_map[primary_metric].dropna()
+            if not series.empty:
+                fig_hist = px.histogram(series, x=series, nbins=30, title=f"Distribution of {primary_metric}")
+                _style_and_render(fig_hist)
+    elif metric_cols and category_cols:
+        metric = metric_cols[0]
+        cat = category_cols[0]
+        temp_df = df[[cat]].copy()
+        temp_df[metric] = numeric_series_map[metric]
+        grouped = temp_df.groupby(cat)[metric].mean(numeric_only=True).reset_index()
+        if not grouped.empty:
+            fig_bar = px.bar(grouped, x=cat, y=metric, title=f"Average {metric} by {cat}")
+            _style_and_render(fig_bar)
+        counts = df[cat].value_counts().reset_index()
+        counts.columns = [cat, 'Count']
+        if not counts.empty:
+            fig_count = px.bar(counts, x=cat, y='Count', title=f"Count by {cat}")
+            _style_and_render(fig_count)
+    elif category_cols:
+        cat = category_cols[0]
+        counts = df[cat].value_counts().reset_index()
+        counts.columns = [cat, 'Count']
+        if not counts.empty:
+            fig_cat = px.bar(counts, x=cat, y='Count', title=f"Count by {cat}")
+            _style_and_render(fig_cat)
+
+    if not overview_charts_html and metric_cols:
+        fallback_metric = metric_cols[0]
+        series = numeric_series_map[fallback_metric].dropna()
+        if not series.empty:
+            fig_fallback = px.histogram(series, x=series, nbins=30, title=f"Distribution of {fallback_metric}")
+            _style_and_render(fig_fallback)
+
+    return dataset_summary, overview_insights, overview_charts_html
 
 
 TRADING_CORE_COLUMNS = {
@@ -243,6 +511,7 @@ def _load_dataframe(data_path: Path, max_rows: int = 150_000) -> pd.DataFrame:
         df = pd.concat(dfs, ignore_index=True)
 
     df.columns = df.columns.str.strip()
+    df.columns = _ensure_unique_columns(df.columns)
     df = _coerce_datetime_columns(df)
     df = _enforce_dataframe_limits(df, max_rows=max_rows)
     return df
@@ -719,7 +988,16 @@ def generate_chart_suggestions(df, max_suggestions=10):
     suggestions = []
     df = df.dropna(axis=1, how='all')
 
-    numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+    numeric_series_map: dict[str, pd.Series] = {}
+    for col in df.columns:
+        coerced = pd.to_numeric(df[col], errors='coerce')
+        if coerced.notna().sum() > 0:
+            numeric_series_map[col] = coerced
+    numeric_cols = list(numeric_series_map.keys())
+    numeric_df = df.copy()
+    for col, series in numeric_series_map.items():
+        numeric_df[col] = series
+
     categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
     datetime_cols = [
         column
@@ -730,7 +1008,7 @@ def generate_chart_suggestions(df, max_suggestions=10):
     # 1. Time trends: look for columns that change steadily over time
     for tcol in datetime_cols:
         for num in numeric_cols:
-            non_missing = df[[tcol, num]].dropna()
+            non_missing = numeric_df[[tcol, num]].dropna()
             if len(non_missing) < 5:
                 continue
 
@@ -755,7 +1033,7 @@ def generate_chart_suggestions(df, max_suggestions=10):
             continue
 
         for num in numeric_cols:
-            group_means = df.groupby(cat)[num].mean()
+            group_means = numeric_df.groupby(cat)[num].mean()
             if group_means.empty or group_means.std() == 0:
                 continue
             # relative variability of group means
@@ -785,7 +1063,7 @@ def generate_chart_suggestions(df, max_suggestions=10):
     # 3. Numeric vs numeric: measure actual correlation strength
     for i, c1 in enumerate(numeric_cols):
         for c2 in numeric_cols[i+1:]:
-            subset = df[[c1, c2]].dropna()
+            subset = numeric_df[[c1, c2]].dropna()
             if len(subset) < 5:
                 continue
             corr = subset[c1].corr(subset[c2])
@@ -798,6 +1076,21 @@ def generate_chart_suggestions(df, max_suggestions=10):
                     "x": c1,
                     "y": c2,
                     "score": float(abs(corr) + 1.2)  # rank strong correlations highest
+                })
+
+    # Always include a baseline numeric distribution suggestion when numeric data exists
+    if numeric_cols:
+        numeric_var = {col: numeric_series_map[col].var(skipna=True) for col in numeric_cols}
+        primary_numeric = max(numeric_var, key=lambda c: (numeric_var[c] if not pd.isna(numeric_var[c]) else -np.inf), default=None)
+        if primary_numeric and not pd.isna(numeric_var.get(primary_numeric, np.nan)):
+            base_title = f"Distribution of {primary_numeric}"
+            if not any(s.get("title") == base_title for s in suggestions):
+                suggestions.append({
+                    "title": base_title,
+                    "chart_type": "histogram",
+                    "x": primary_numeric,
+                    "y": None,
+                    "score": float(max(numeric_var.get(primary_numeric, 0), 0.25) + 0.4),
                 })
 
     # Rank and trim
@@ -959,6 +1252,9 @@ def dashboard():
     summary = None
     dataset_synopsis = None
     suggestions = None
+    dataset_summary: dict = {}
+    overview_insights: list[str] = []
+    overview_charts_html: list[str] = []
 
     if not filename and uploads:
         filename = uploads[0].filename
@@ -981,6 +1277,7 @@ def dashboard():
         if filepath.exists():
             try:
                 df = _load_dataframe(filepath)
+                dataset_summary, overview_insights, overview_charts_html = build_tableau_overview(df)
                 analysis_df = _analysis_subset(df)
                 table_html, columns = _render_preview_table(df)
                 summary = _summarise_dataframe(analysis_df)
@@ -1012,7 +1309,10 @@ def dashboard():
         chart_notes=chart_notes,
         quality_signals=quality_signals,
         extra_insights=extra_insights,
-        saved_charts=saved_charts
+        saved_charts=saved_charts,
+        dataset_summary=dataset_summary,
+        overview_insights=overview_insights,
+        overview_charts_html=overview_charts_html,
     )
 
 @app.route('/upload', methods=['POST'])
@@ -1035,6 +1335,9 @@ def upload():
     safe_name: str
     stored_name: str
     filepath: Path
+    dataset_summary: dict = {}
+    overview_insights: list[str] = []
+    overview_charts_html: list[str] = []
 
     if google_sheet_url:
         try:
@@ -1074,6 +1377,7 @@ def upload():
     db.session.add(new_upload)
 
     try:
+        dataset_summary, overview_insights, overview_charts_html = build_tableau_overview(df)
         analysis_df = _analysis_subset(df)
         summary = _summarise_dataframe(analysis_df)
         suggestions = generate_chart_suggestions(analysis_df)
@@ -1128,7 +1432,10 @@ def upload():
             .filter_by(user_id=session['user_id'])
             .order_by(SavedChart.created_at.desc())
             .all()
-        )
+        ),
+        dataset_summary=dataset_summary,
+        overview_insights=overview_insights,
+        overview_charts_html=overview_charts_html,
     )
 
 @app.route('/visualize', methods=['POST'])
@@ -1147,6 +1454,9 @@ def visualize():
     sample_fraction = request.form.get('sample_fraction')
     save_title = request.form.get('save_title')
     shareable = request.form.get('shareable') == 'on'
+    dataset_summary: dict = {}
+    overview_insights: list[str] = []
+    overview_charts_html: list[str] = []
 
     if not filename or not x_column or not chart_type:
         flash("Missing form data")
@@ -1240,6 +1550,7 @@ def visualize():
             db.session.commit()
 
         # Update suggestions, preview, summary
+        dataset_summary, overview_insights, overview_charts_html = build_tableau_overview(df)
         analysis_df = _analysis_subset(df)
         suggestions = generate_chart_suggestions(analysis_df)
         dataset_type, trading_charts, data_health_charts, chart_notes = _prepare_visual_context(analysis_df)
@@ -1269,6 +1580,9 @@ def visualize():
             chart_notes=chart_notes,
             quality_signals=_data_quality_signals(analysis_df),
             extra_insights=_generate_additional_insights(analysis_df),
+            dataset_summary=dataset_summary,
+            overview_insights=overview_insights,
+            overview_charts_html=overview_charts_html,
             saved_charts=(
                 SavedChart.query
                 .filter_by(user_id=session['user_id'])
@@ -1316,6 +1630,28 @@ def delete_file():
     else:
         flash(f"Deleted {display_name}")
         return redirect(url_for('dashboard'))
+
+
+@app.route('/delete_all_files', methods=['POST'])
+def delete_all_files():
+    if 'user' not in session:
+        return redirect(url_for('login'))
+
+    user_id = session['user_id']
+    uploads = Upload.query.filter_by(user_id=user_id).all()
+    user_dir = _user_upload_dir(user_id)
+
+    for upload in uploads:
+        filepath = user_dir / upload.filename
+        if filepath.exists():
+            filepath.unlink()
+        DatasetProfile.query.filter_by(upload_id=upload.id).delete()
+        SavedChart.query.filter_by(upload_id=upload.id).delete()
+        db.session.delete(upload)
+
+    db.session.commit()
+    flash('All uploaded files have been deleted.')
+    return redirect(url_for('dashboard'))
 
 
 @app.route('/save_chart/<int:chart_id>/delete', methods=['POST'])

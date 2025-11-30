@@ -89,6 +89,50 @@
       {% endif %}
     {% endwith %}
 
+    {% if chart %}
+      <div class="card mt-3 mb-4">
+        <div class="card-header">Generated Chart</div>
+        <div class="card-body">
+          {{ chart|safe }}
+        </div>
+      </div>
+    {% endif %}
+
+    {% if dataset_summary %}
+      <div class="card mt-3 mb-4">
+        <div class="card-header">
+          Overview
+        </div>
+        <div class="card-body">
+          <p class="mb-1">
+            Rows: {{ dataset_summary.row_count }}, Columns: {{ dataset_summary.col_count }}
+          </p>
+          <p class="mb-1">
+            Numeric: {{ dataset_summary.num_numeric }}, Datetime: {{ dataset_summary.num_datetime }}, Categorical: {{ dataset_summary.num_categorical }}
+          </p>
+          {% if dataset_summary.primary_time_col %}
+            <p class="mb-3">
+              Time column: {{ dataset_summary.primary_time_col }}, Range: {{ dataset_summary.time_start }} to {{ dataset_summary.time_end }}
+            </p>
+          {% endif %}
+
+          {% if overview_insights %}
+            <ul class="mb-3">
+              {% for line in overview_insights %}
+                <li>{{ line }}</li>
+              {% endfor %}
+            </ul>
+          {% endif %}
+
+          {% for chart_html in overview_charts_html %}
+            <div class="mb-4">
+              {{ chart_html|safe }}
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+    {% endif %}
+
     <!-- CSV Preview -->
     {% if table %}
       <div class="accordion mt-4" id="previewAccordion">
@@ -198,11 +242,11 @@
       <div class="accordion mt-4" id="chartAccordion">
         <div class="accordion-item">
           <h2 class="accordion-header" id="chartHeading">
-            <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#collapseChart">
+            <button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#collapseChart">
               Create a Custom Chart
             </button>
           </h2>
-          <div id="collapseChart" class="accordion-collapse collapse">
+          <div id="collapseChart" class="accordion-collapse collapse show">
             <div class="accordion-body">
               <form method="POST" action="{{ url_for('visualize') }}">
                 <input type="hidden" name="filename" value="{{ selected_file or (uploads[0].filename if uploads) }}">
@@ -277,78 +321,113 @@
     {% endif %}
 
     <!-- Uploaded Files -->
-    <div class="mt-5">
-      <h4>Uploaded Files</h4>
-      {% if uploads %}
-        <ul class="list-group mb-4" id="fileList">
-          {% for upload in uploads %}
-            {% set is_selected = upload.filename == (selected_file or '') %}
-            {% if upload.filename|file_exists %}
-              <li class="list-group-item d-flex justify-content-between align-items-center file-item {% if is_selected %}list-group-item-info{% endif %}" data-filename="{{ upload.filename }}" role="button">
-                <div>
-                  <span class="fw-semibold">{{ upload.original_filename }}</span>
-                  <small class="text-muted d-block">Uploaded {{ upload.timestamp.strftime('%b %d, %Y at %I:%M %p') }}</small>
-                </div>
-                <form method="POST" action="{{ url_for('delete_file') }}" class="mb-0">
-                  <input type="hidden" name="filename" value="{{ upload.filename }}">
-                  <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
+    <div class="accordion mt-5" id="filesAccordion">
+      <div class="accordion-item">
+        <h2 class="accordion-header" id="filesHeading">
+          <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#collapseFiles">
+            Uploaded Files
+          </button>
+        </h2>
+        <div id="collapseFiles" class="accordion-collapse collapse">
+          <div class="accordion-body">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+              <div class="text-muted small">Click a file to load it.</div>
+              {% if uploads %}
+                <form method="POST" action="{{ url_for('delete_all_files') }}" class="mb-0" onsubmit="return confirm('Delete all uploaded files?');">
+                  <button type="submit" class="btn btn-sm btn-outline-danger">Delete all files</button>
                 </form>
-              </li>
+              {% endif %}
+            </div>
+            {% if uploads %}
+              <ul class="list-group mb-2" id="fileList">
+                {% for upload in uploads %}
+                  {% set is_selected = upload.filename == (selected_file or '') %}
+                  {% if upload.filename|file_exists %}
+                    <li class="list-group-item d-flex justify-content-between align-items-center file-item {% if is_selected %}list-group-item-info{% endif %}" data-filename="{{ upload.filename }}" role="button">
+                      <div>
+                        <span class="fw-semibold">{{ upload.original_filename }}</span>
+                        <small class="text-muted d-block">Uploaded {{ upload.timestamp.strftime('%b %d, %Y at %I:%M %p') }}</small>
+                      </div>
+                      <form method="POST" action="{{ url_for('delete_file') }}" class="mb-0">
+                        <input type="hidden" name="filename" value="{{ upload.filename }}">
+                        <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
+                      </form>
+                    </li>
+                  {% endif %}
+                {% endfor %}
+              </ul>
+            {% else %}
+              <p class="mb-0">No uploads yet.</p>
             {% endif %}
-          {% endfor %}
-        </ul>
-      {% else %}
-        <p>No uploads yet.</p>
-      {% endif %}
-
-      {% if chart %}
-        {{ chart|safe }}
-      {% endif %}
+          </div>
+        </div>
+      </div>
+    </div>
 
       {% if dataset_type == 'trading_paper_trades' %}
-        <div class="mt-4">
-          <h5>Trading insights</h5>
-          <p class="text-muted small">Automatic views tailored for the Stock_Analysis_App CSVs to explain positions, strategies, and trade timing.</p>
-          {% if trading_charts %}
-            {% for viz in trading_charts %}
-              <div class="mb-4">
-                <div class="d-flex align-items-center justify-content-between">
-                  <h6 class="mb-1">{{ viz.title }}</h6>
-                </div>
-                <p class="text-muted small mb-2">{{ viz.description }}</p>
-                <div class="border rounded p-2">{{ viz.html|safe }}</div>
+        <div class="accordion mt-4" id="tradingAccordion">
+          <div class="accordion-item">
+            <h2 class="accordion-header" id="tradingHeading">
+              <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#collapseTrading">
+                Trading insights
+              </button>
+            </h2>
+            <div id="collapseTrading" class="accordion-collapse collapse">
+              <div class="accordion-body">
+                <p class="text-muted small">Automatic views tailored for the Stock_Analysis_App CSVs to explain positions, strategies, and trade timing.</p>
+                {% if trading_charts %}
+                  {% for viz in trading_charts %}
+                    <div class="mb-4">
+                      <div class="d-flex align-items-center justify-content-between">
+                        <h6 class="mb-1">{{ viz.title }}</h6>
+                      </div>
+                      <p class="text-muted small mb-2">{{ viz.description }}</p>
+                      <div class="border rounded p-2">{{ viz.html|safe }}</div>
+                    </div>
+                  {% endfor %}
+                {% else %}
+                  <p class="text-muted small mb-0">No trading-specific visuals could be generated for this file.</p>
+                {% endif %}
               </div>
-            {% endfor %}
-          {% else %}
-            <p class="text-muted small">No trading-specific visuals could be generated for this file.</p>
-          {% endif %}
+            </div>
+          </div>
         </div>
       {% endif %}
 
-      <div class="mt-4">
-        <h5>Data health</h5>
-        <p class="text-muted small">These charts highlight missing data and relationships between numeric columns to help spot data issues.</p>
-        {% if data_health_charts %}
-          {% for viz in data_health_charts %}
-            <div class="mb-4">
-              <h6 class="mb-1">{{ viz.title }}</h6>
-              <p class="text-muted small mb-2">{{ viz.description }}</p>
-              <div class="border rounded p-2">{{ viz.html|safe }}</div>
+      <div class="accordion mt-4" id="healthAccordion">
+        <div class="accordion-item">
+          <h2 class="accordion-header" id="healthHeading">
+            <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#collapseHealth">
+              Data health
+            </button>
+          </h2>
+          <div id="collapseHealth" class="accordion-collapse collapse">
+            <div class="accordion-body">
+              <p class="text-muted small">These charts highlight missing data and relationships between numeric columns to help spot data issues.</p>
+              {% if data_health_charts %}
+                {% for viz in data_health_charts %}
+                  <div class="mb-4">
+                    <h6 class="mb-1">{{ viz.title }}</h6>
+                    <p class="text-muted small mb-2">{{ viz.description }}</p>
+                    <div class="border rounded p-2">{{ viz.html|safe }}</div>
+                  </div>
+                {% endfor %}
+              {% else %}
+                <p class="text-muted small">No data health visuals were generated for this dataset.</p>
+              {% endif %}
+              {% if chart_notes %}
+                <div class="alert alert-secondary">
+                  <div class="fw-semibold">Generation notes</div>
+                  <ul class="mb-0">
+                    {% for note in chart_notes %}
+                      <li>{{ note }}</li>
+                    {% endfor %}
+                  </ul>
+                </div>
+              {% endif %}
             </div>
-          {% endfor %}
-        {% else %}
-          <p class="text-muted small">No data health visuals were generated for this dataset.</p>
-        {% endif %}
-        {% if chart_notes %}
-          <div class="alert alert-secondary">
-            <div class="fw-semibold">Generation notes</div>
-            <ul class="mb-0">
-              {% for note in chart_notes %}
-                <li>{{ note }}</li>
-              {% endfor %}
-            </ul>
           </div>
-        {% endif %}
+        </div>
       </div>
 
       {% if saved_charts %}

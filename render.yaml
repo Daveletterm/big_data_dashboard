@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: big-data-dashboard
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    autoDeploy: true
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DATABASE_URL
+        sync: false
+      - key: MAPBOX_TOKEN
+        sync: false
