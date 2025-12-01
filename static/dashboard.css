@@ -67,6 +67,13 @@ body {
   color: var(--text-color);
 }
 
+[data-theme="dark"] .text-muted,
+[data-theme="dark"] .form-text,
+[data-theme="dark"] small,
+[data-theme="dark"] .small {
+  color: var(--text-color) !important;
+}
+
 .badge.text-bg-light {
   background: rgba(13, 110, 253, 0.12) !important;
   color: var(--accent) !important;
