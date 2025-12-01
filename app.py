@@ -18,6 +18,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.io as pio
 from plotly.io import to_html
+from plotly.utils import PlotlyJSONEncoder
 import json
 
 pio.renderers.default = 'iframe'
@@ -1253,6 +1254,13 @@ class SavedChart(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     upload_id = db.Column(db.Integer, db.ForeignKey('upload.id'), nullable=False)
     title = db.Column(db.String(255), nullable=False)
+    chart_type = db.Column(db.String(50), nullable=True)
+    x_column = db.Column(db.String(255), nullable=True)
+    y_column = db.Column(db.String(255), nullable=True)
+    filter_column = db.Column(db.String(255), nullable=True)
+    filter_value = db.Column(db.String(255), nullable=True)
+    sample_fraction = db.Column(db.Float, nullable=True)
+    figure_json = db.Column(db.Text, nullable=True)
     chart_html = db.Column(db.Text, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
     shared_token = db.Column(db.String(64), unique=True, nullable=True)
@@ -1265,6 +1273,35 @@ class DatasetProfile(db.Model):
     null_summary = db.Column(db.Text, nullable=True)
     quality_notes = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+
+def _render_saved_chart_html(saved_chart: SavedChart) -> str:
+    if saved_chart.figure_json:
+        try:
+            fig = pio.from_json(saved_chart.figure_json)
+            return fig.to_html(full_html=False, include_plotlyjs=False)
+        except Exception:
+            pass
+    return saved_chart.chart_html
+
+
+def _prepare_saved_chart_views(saved_charts: list[SavedChart]) -> list[dict]:
+    views: list[dict] = []
+    for chart in saved_charts:
+        views.append({
+            "id": chart.id,
+            "title": chart.title,
+            "created_at": chart.created_at,
+            "shared_token": chart.shared_token,
+            "chart_type": chart.chart_type,
+            "x_column": chart.x_column,
+            "y_column": chart.y_column,
+            "filter_column": chart.filter_column,
+            "filter_value": chart.filter_value,
+            "sample_fraction": chart.sample_fraction,
+            "html": _render_saved_chart_html(chart),
+        })
+    return views
 
 
 with app.app_context():
@@ -1346,9 +1383,22 @@ def dashboard():
     overview_insights: list[str] = []
     overview_charts_html: list[str] = []
     chart_html: str | None = None
+    saved_chart_views: list[dict] = []
 
+    selected_upload = None
     if not filename and uploads:
-        filename = uploads[0].filename
+        selected_upload = uploads[0]
+        filename = selected_upload.filename
+    elif filename:
+        selected_upload = Upload.query.filter_by(filename=filename, user_id=session['user_id']).first()
+
+    if selected_upload:
+        saved_chart_views = _prepare_saved_chart_views(
+            SavedChart.query
+            .filter_by(user_id=session['user_id'], upload_id=selected_upload.id)
+            .order_by(SavedChart.created_at.desc())
+            .all()
+        )
 
     dataset_type = 'generic'
     trading_charts: list[dict[str, str]] = []
@@ -1356,12 +1406,6 @@ def dashboard():
     chart_notes: list[str] = []
     quality_signals = {}
     extra_insights = {}
-    saved_charts = (
-        SavedChart.query
-        .filter_by(user_id=session['user_id'])
-        .order_by(SavedChart.created_at.desc())
-        .all()
-    )
 
     if filename:
         filepath = _user_upload_dir(session['user_id']) / filename
@@ -1401,7 +1445,7 @@ def dashboard():
         chart_notes=chart_notes,
         quality_signals=quality_signals,
         extra_insights=extra_insights,
-        saved_charts=saved_charts,
+        saved_charts=saved_chart_views,
         dataset_summary=dataset_summary,
         overview_insights=overview_insights,
         overview_charts_html=overview_charts_html,
@@ -1522,9 +1566,9 @@ def upload():
         chart_notes=chart_notes,
         quality_signals=_data_quality_signals(analysis_df),
         extra_insights=_generate_additional_insights(analysis_df),
-        saved_charts=(
+        saved_charts=_prepare_saved_chart_views(
             SavedChart.query
-            .filter_by(user_id=session['user_id'])
+            .filter_by(user_id=session['user_id'], upload_id=new_upload.id)
             .order_by(SavedChart.created_at.desc())
             .all()
         ),
@@ -1562,6 +1606,7 @@ def visualize():
         flash('Y axis is required for this chart type')
         return redirect(url_for('dashboard'))
 
+    upload = Upload.query.filter_by(filename=filename, user_id=session['user_id']).first()
     filepath = _user_upload_dir(session['user_id']) / filename
     if not filepath.exists():
         flash("Selected file not found")
@@ -1569,6 +1614,8 @@ def visualize():
 
     try:
         df = _load_dataframe(filepath)
+
+        sample_fraction_value: float | None = None
 
         if filter_column and filter_column in df.columns and filter_value:
             mask = df[filter_column].astype(str).str.contains(re.escape(filter_value), case=False, na=False)
@@ -1578,6 +1625,7 @@ def visualize():
                 frac = float(sample_fraction)
                 if 0 < frac < 1:
                     df = df.sample(frac=frac, random_state=42)
+                    sample_fraction_value = frac
             except ValueError:
                 flash('Invalid sample fraction; ignoring.')
 
@@ -1654,16 +1702,23 @@ def visualize():
             return redirect(url_for('dashboard'))
 
         chart_html = fig.to_html(full_html=False)
+        figure_json = json.dumps(fig, cls=PlotlyJSONEncoder)
 
         if save_title:
             token = uuid.uuid4().hex if shareable else None
-            upload = Upload.query.filter_by(filename=filename, user_id=session['user_id']).first()
             if not upload:
                 raise ValueError('Upload not found for saving chart')
             saved = SavedChart(
                 user_id=session['user_id'],
                 upload_id=upload.id,
                 title=save_title,
+                chart_type=chart_type,
+                x_column=x_column,
+                y_column=y_column or None,
+                filter_column=filter_column,
+                filter_value=filter_value,
+                sample_fraction=sample_fraction_value,
+                figure_json=figure_json,
                 chart_html=chart_html,
                 shared_token=token
             )
@@ -1704,12 +1759,12 @@ def visualize():
             dataset_summary=dataset_summary,
             overview_insights=overview_insights,
             overview_charts_html=overview_charts_html,
-            saved_charts=(
+            saved_charts=_prepare_saved_chart_views(
                 SavedChart.query
-                .filter_by(user_id=session['user_id'])
+                .filter_by(user_id=session['user_id'], upload_id=upload.id if upload else None)
                 .order_by(SavedChart.created_at.desc())
                 .all()
-            )
+            ) if upload else []
         )
 
     except Exception as e:
@@ -1781,16 +1836,20 @@ def delete_saved_chart(chart_id: int):
         return redirect(url_for('login'))
 
     chart = SavedChart.query.filter_by(id=chart_id, user_id=session['user_id']).first_or_404()
+    upload = Upload.query.get(chart.upload_id)
     db.session.delete(chart)
     db.session.commit()
     flash('Saved chart deleted')
+    if upload:
+        return redirect(url_for('dashboard', filename=upload.filename))
     return redirect(url_for('dashboard'))
 
 
 @app.route('/charts/<token>')
 def shared_chart(token: str):
     chart = SavedChart.query.filter_by(shared_token=token).first_or_404()
-    return render_template('shared_chart.html', chart_html=chart.chart_html, title=chart.title)
+    chart_html = _render_saved_chart_html(chart)
+    return render_template('shared_chart.html', chart_html=chart_html, title=chart.title)
 
 
 
