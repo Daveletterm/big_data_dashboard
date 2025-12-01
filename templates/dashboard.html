@@ -89,11 +89,57 @@
       {% endif %}
     {% endwith %}
 
-    {% if chart %}
+    {% if generated_chart_html or chart %}
       <div class="card mt-3 mb-4">
         <div class="card-header">Generated Chart</div>
         <div class="card-body">
-          {{ chart|safe }}
+          {{ (generated_chart_html or chart)|safe }}
+
+          {% if current_upload %}
+            <form method="POST" action="{{ url_for('save_generated_chart', filename=selected_file) }}" class="mt-3">
+              <input type="hidden" name="upload_id" value="{{ current_upload.id }}">
+              {% if generated_figure_json %}
+                <input type="hidden" name="figure_json" value='{{ generated_figure_json|e }}'>
+              {% endif %}
+              {% if generated_chart_html or chart %}
+                <input type="hidden" name="chart_html" value='{{ (generated_chart_html or chart)|e }}'>
+              {% endif %}
+              {% if generated_x_column %}
+                <input type="hidden" name="x_column" value="{{ generated_x_column }}">
+              {% endif %}
+              {% if generated_y_column %}
+                <input type="hidden" name="y_column" value="{{ generated_y_column }}">
+              {% endif %}
+
+              <div class="row g-2 align-items-center">
+                <div class="col-md-5">
+                  <input
+                    type="text"
+                    class="form-control"
+                    name="title"
+                    placeholder="Give this chart a name (optional)"
+                  >
+                </div>
+                <div class="col-md-3 form-check">
+                  <input
+                    class="form-check-input"
+                    type="checkbox"
+                    id="generated-share"
+                    name="generate_shareable"
+                    value="1"
+                  >
+                  <label class="form-check-label" for="generated-share">
+                    Create shareable link
+                  </label>
+                </div>
+                <div class="col-md-4 text-end">
+                  <button type="submit" class="btn btn-primary">
+                    Save chart
+                  </button>
+                </div>
+              </div>
+            </form>
+          {% endif %}
         </div>
       </div>
     {% endif %}
@@ -335,6 +381,9 @@
                   <div class="d-flex justify-content-between align-items-start">
                     <div>
                       <div class="fw-semibold">{{ chart.title }}</div>
+                      <div class="mb-1">
+                        <span class="badge bg-secondary">{{ chart.chart_type or 'custom' }}</span>
+                      </div>
                       <div class="text-muted small">Saved {{ chart.created_at.strftime('%b %d, %Y %H:%M') }}</div>
                       <div class="text-muted small">
                         {% if chart.chart_type %}

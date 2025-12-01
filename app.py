@@ -1043,15 +1043,18 @@ def _schema_drift_message(user_id: int, original_filename: str, current_schema: 
         return '; '.join(changes)
     return None
 
-def build_generated_chart(df: pd.DataFrame) -> str:
-    """Build a sensible default Plotly chart for the dashboard hero slot."""
+def build_generated_chart(df: pd.DataFrame) -> tuple[str, str | None, str | None, str | None]:
+    """Build a sensible default Plotly chart for the dashboard hero slot.
+
+    Returns a tuple of (chart_html, figure_json, x_column, y_column).
+    """
 
     if df is None or df.empty:
-        return "<div class='text-muted'>No suitable data for chart.</div>"
+        return "<div class='text-muted'>No suitable data for chart.</div>", None, None, None
 
     df = df.dropna(axis=1, how='all')
     if df.empty:
-        return "<div class='text-muted'>No suitable data for chart.</div>"
+        return "<div class='text-muted'>No suitable data for chart.</div>", None, None, None
 
     column_types = _basic_column_types(df)
     numeric_map = _numeric_series_map(df)
@@ -1059,9 +1062,14 @@ def build_generated_chart(df: pd.DataFrame) -> str:
     datetime_cols = column_types["datetime"]
     categorical_cols = column_types["categorical"]
 
-    def _safe_html(fig) -> str:
+    def _safe_payload(fig, x_col: str | None = None, y_col: str | None = None):
         fig.update_layout(margin=dict(l=40, r=20, t=60, b=40))
-        return fig.to_html(full_html=False)
+        return (
+            fig.to_html(full_html=False),
+            json.dumps(fig, cls=PlotlyJSONEncoder),
+            x_col,
+            y_col,
+        )
 
     if datetime_cols and numeric_cols:
         time_col = datetime_cols[0]
@@ -1072,7 +1080,7 @@ def build_generated_chart(df: pd.DataFrame) -> str:
         time_df = time_df.dropna(subset=[time_col, y_col]).sort_values(time_col)
         if not time_df.empty:
             fig = px.line(time_df, x=time_col, y=y_col, title=f"Trend of {y_col} over time")
-            return _safe_html(fig)
+            return _safe_payload(fig, x_col=time_col, y_col=y_col)
 
     if len(numeric_cols) == 1 and categorical_cols:
         metric = numeric_cols[0]
@@ -1086,14 +1094,14 @@ def build_generated_chart(df: pd.DataFrame) -> str:
         if grouped[cat].nunique(dropna=True) > 50:
             grouped = grouped.head(20)
         fig = px.bar(grouped, x=cat, y=metric, title=f"Average {metric} by {cat}")
-        return _safe_html(fig)
+        return _safe_payload(fig, x_col=cat, y_col=metric)
 
     if len(numeric_cols) == 1:
         metric = numeric_cols[0]
         series = numeric_map[metric].dropna()
         if not series.empty:
             fig = px.histogram(series, x=series, nbins=30, title=f"Distribution of {metric}")
-            return _safe_html(fig)
+            return _safe_payload(fig, x_col=metric)
 
     if len(numeric_cols) >= 2:
         corr_df = pd.DataFrame({col: numeric_map[col] for col in numeric_cols})
@@ -1106,7 +1114,7 @@ def build_generated_chart(df: pd.DataFrame) -> str:
                 title='Correlation heatmap',
                 labels={'color': 'Correlation'},
             )
-            return _safe_html(fig)
+            return _safe_payload(fig)
 
     if categorical_cols:
         cat = categorical_cols[0]
@@ -1114,9 +1122,9 @@ def build_generated_chart(df: pd.DataFrame) -> str:
         if not counts.empty:
             counts.columns = [cat, 'Count']
             fig = px.bar(counts, x=cat, y='Count', title=f"Counts of {cat}")
-            return _safe_html(fig)
+            return _safe_payload(fig, x_col=cat)
 
-    return "<div class='text-muted'>No suitable data for chart.</div>"
+    return "<div class='text-muted'>No suitable data for chart.</div>", None, None, None
 
 
 
@@ -1406,6 +1414,9 @@ def dashboard():
     overview_insights: list[str] = []
     overview_charts_html: list[str] = []
     chart_html: str | None = None
+    generated_figure_json: str | None = None
+    generated_x_column: str | None = None
+    generated_y_column: str | None = None
     saved_chart_views: list[dict] = []
 
     selected_upload = None
@@ -1444,7 +1455,12 @@ def dashboard():
                 quality_signals = _data_quality_signals(analysis_df)
                 extra_insights = _generate_additional_insights(analysis_df)
                 dataset_synopsis = _dataset_brief(analysis_df)
-                chart_html = build_generated_chart(analysis_df)
+                (
+                    chart_html,
+                    generated_figure_json,
+                    generated_x_column,
+                    generated_y_column,
+                ) = build_generated_chart(analysis_df)
             except Exception as e:
                 flash(f"Error loading file '{filename}': {e}")
         else:
@@ -1473,6 +1489,11 @@ def dashboard():
         overview_insights=overview_insights,
         overview_charts_html=overview_charts_html,
         chart=chart_html,
+        generated_chart_html=chart_html,
+        generated_figure_json=generated_figure_json,
+        generated_x_column=generated_x_column,
+        generated_y_column=generated_y_column,
+        current_upload=selected_upload,
     )
 
 @app.route('/upload', methods=['POST'])
@@ -1544,7 +1565,12 @@ def upload():
         suggestions = generate_chart_suggestions(analysis_df)
         dataset_type, trading_charts, data_health_charts, chart_notes = _prepare_visual_context(analysis_df)
         table_html, columns = _render_preview_table(df)
-        chart_html = build_generated_chart(analysis_df)
+        (
+            chart_html,
+            generated_figure_json,
+            generated_x_column,
+            generated_y_column,
+        ) = build_generated_chart(analysis_df)
         db.session.commit()
         _save_profile(new_upload, analysis_df)
         db.session.commit()
@@ -1599,6 +1625,11 @@ def upload():
         overview_insights=overview_insights,
         overview_charts_html=overview_charts_html,
         chart=chart_html,
+        generated_chart_html=chart_html,
+        generated_figure_json=generated_figure_json,
+        generated_x_column=generated_x_column,
+        generated_y_column=generated_y_column,
+        current_upload=new_upload,
     )
 
 @app.route('/visualize', methods=['POST'])
@@ -1620,6 +1651,10 @@ def visualize():
     dataset_summary: dict = {}
     overview_insights: list[str] = []
     overview_charts_html: list[str] = []
+    generated_chart_html: str | None = None
+    generated_figure_json: str | None = None
+    generated_x_column: str | None = None
+    generated_y_column: str | None = None
 
     if not filename or not x_column or not chart_type:
         flash("Missing form data")
@@ -1751,6 +1786,12 @@ def visualize():
         # Update suggestions, preview, summary
         dataset_summary, overview_insights, overview_charts_html = build_tableau_overview(df)
         analysis_df = _analysis_subset(df)
+        (
+            generated_chart_html,
+            generated_figure_json,
+            generated_x_column,
+            generated_y_column,
+        ) = build_generated_chart(analysis_df)
         suggestions = generate_chart_suggestions(analysis_df)
         dataset_type, trading_charts, data_health_charts, chart_notes = _prepare_visual_context(analysis_df)
         table_html, columns = _render_preview_table(df)
@@ -1787,12 +1828,71 @@ def visualize():
                 .filter_by(user_id=session['user_id'], upload_id=upload.id if upload else None)
                 .order_by(SavedChart.created_at.desc())
                 .all()
-            ) if upload else []
+            ) if upload else [],
+            generated_chart_html=generated_chart_html,
+            generated_figure_json=generated_figure_json,
+            generated_x_column=generated_x_column,
+            generated_y_column=generated_y_column,
+            current_upload=upload,
         )
 
     except Exception as e:
         flash(f"Error generating chart: {e}")
         return redirect(url_for('dashboard'))
+
+
+@app.route('/save_generated_chart', methods=['POST'])
+def save_generated_chart():
+    if 'user' not in session:
+        return redirect(url_for('login'))
+
+    upload_id = request.form.get('upload_id', type=int)
+    title = request.form.get('title', '').strip()
+    generate_shareable = request.form.get('generate_shareable') in {'1', 'on', 'true', 'yes'}
+
+    if not upload_id:
+        flash('No upload selected for saving chart.')
+        return redirect(url_for('dashboard'))
+
+    upload = Upload.query.filter_by(id=upload_id, user_id=session['user_id']).first()
+    if not upload:
+        flash('Upload not found for saving chart.')
+        return redirect(url_for('dashboard'))
+
+    if not title:
+        base_name = upload.original_filename if upload else 'Generated chart'
+        title = f"{base_name} (auto chart)"
+
+    figure_json = request.form.get('figure_json')
+    chart_html = request.form.get('chart_html')
+    x_column = request.form.get('x_column') or None
+    y_column = request.form.get('y_column') or None
+
+    if not chart_html:
+        flash('No generated chart available to save.')
+        return redirect(url_for('dashboard', filename=upload.filename))
+
+    token = uuid.uuid4().hex if generate_shareable else None
+
+    saved = SavedChart(
+        user_id=session['user_id'],
+        upload_id=upload.id,
+        title=title,
+        chart_type='auto',
+        x_column=x_column,
+        y_column=y_column,
+        filter_column=None,
+        filter_value=None,
+        sample_fraction=None,
+        figure_json=figure_json,
+        chart_html=chart_html,
+        shared_token=token,
+    )
+    db.session.add(saved)
+    db.session.commit()
+
+    flash('Generated chart saved.', 'success')
+    return redirect(url_for('dashboard', filename=upload.filename))
 
 @app.route('/delete_file', methods=['POST'])
 def delete_file():
