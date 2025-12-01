@@ -316,9 +316,61 @@
               </form>
             </div>
           </div>
+      </div>
+    </div>
+  {% endif %}
+
+    <div class="accordion mt-4" id="savedChartsAccordion">
+      <div class="accordion-item">
+        <h2 class="accordion-header" id="savedChartsHeading">
+          <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#collapseSavedCharts">
+            Saved charts
+          </button>
+        </h2>
+        <div id="collapseSavedCharts" class="accordion-collapse collapse">
+          <div class="accordion-body">
+            {% if saved_charts %}
+              {% for chart in saved_charts %}
+                <div class="border rounded p-3 mb-3">
+                  <div class="d-flex justify-content-between align-items-start">
+                    <div>
+                      <div class="fw-semibold">{{ chart.title }}</div>
+                      <div class="text-muted small">Saved {{ chart.created_at.strftime('%b %d, %Y %H:%M') }}</div>
+                      <div class="text-muted small">
+                        {% if chart.chart_type %}
+                          {{ chart.chart_type|capitalize }} chart
+                        {% endif %}
+                        {% if chart.x_column %}
+                          • X: {{ chart.x_column }}
+                        {% endif %}
+                        {% if chart.y_column %}
+                          • Y: {{ chart.y_column }}
+                        {% endif %}
+                        {% if chart.filter_column and chart.filter_value %}
+                          • Filter: {{ chart.filter_column }} contains "{{ chart.filter_value }}"
+                        {% endif %}
+                        {% if chart.sample_fraction %}
+                          • Sample: {{ '%.2f'|format(chart.sample_fraction) }}
+                        {% endif %}
+                      </div>
+                      {% if chart.shared_token %}
+                        <div class="small"><a href="{{ url_for('shared_chart', token=chart.shared_token, _external=True) }}" target="_blank">Share link</a></div>
+                      {% endif %}
+                    </div>
+                    <form method="POST" action="{{ url_for('delete_saved_chart', chart_id=chart.id) }}" class="ms-3 mb-0">
+                      <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
+                    </form>
+                  </div>
+                  <div class="mt-3">{{ chart.html|safe }}</div>
+                </div>
+              {% endfor %}
+            {% else %}
+              <p class="text-muted mb-0">No saved charts for this dataset yet.</p>
+            {% endif %}
+          </div>
         </div>
       </div>
-    {% endif %}
+    </div>
 
     <!-- Uploaded Files -->
     <div class="accordion mt-5" id="filesAccordion">
@@ -430,33 +482,6 @@
         </div>
       </div>
 
-      {% if saved_charts %}
-        <div class="mt-4">
-          <h5>Saved Charts</h5>
-          <div class="list-group">
-            {% for chart in saved_charts %}
-              <div class="list-group-item d-flex justify-content-between align-items-center">
-                <div>
-                  <div class="fw-semibold">{{ chart.title }}</div>
-                  <small class="text-muted">Saved {{ chart.created_at.strftime('%b %d, %Y %H:%M') }}</small>
-                  {% if chart.shared_token %}
-                    <div><a href="{{ url_for('shared_chart', token=chart.shared_token, _external=True) }}" target="_blank">Share link</a></div>
-                  {% endif %}
-                </div>
-                <div class="d-flex gap-2">
-                  <button class="btn btn-sm btn-outline-primary" type="button" data-bs-toggle="collapse" data-bs-target="#chart-preview-{{ chart.id }}">Preview</button>
-                  <form method="POST" action="{{ url_for('delete_saved_chart', chart_id=chart.id) }}" class="mb-0">
-                    <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
-                  </form>
-                </div>
-              </div>
-              <div class="collapse" id="chart-preview-{{ chart.id }}">
-                <div class="card card-body">{{ chart.chart_html|safe }}</div>
-              </div>
-            {% endfor %}
-          </div>
-        </div>
-      {% endif %}
     </div>
   </div>
 
