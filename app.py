@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.io as pio
+from sqlalchemy import text
 from plotly.io import to_html
 from plotly.utils import PlotlyJSONEncoder
 import json
@@ -1304,8 +1305,30 @@ def _prepare_saved_chart_views(saved_charts: list[SavedChart]) -> list[dict]:
     return views
 
 
+def ensure_saved_chart_schema() -> None:
+    statements = [
+        text('ALTER TABLE saved_chart ADD COLUMN IF NOT EXISTS chart_type VARCHAR(50);'),
+        text('ALTER TABLE saved_chart ADD COLUMN IF NOT EXISTS x_column VARCHAR(255);'),
+        text('ALTER TABLE saved_chart ADD COLUMN IF NOT EXISTS y_column VARCHAR(255);'),
+        text('ALTER TABLE saved_chart ADD COLUMN IF NOT EXISTS filter_column VARCHAR(255);'),
+        text('ALTER TABLE saved_chart ADD COLUMN IF NOT EXISTS filter_value VARCHAR(255);'),
+        text('ALTER TABLE saved_chart ADD COLUMN IF NOT EXISTS sample_fraction DOUBLE PRECISION;'),
+        text('ALTER TABLE saved_chart ADD COLUMN IF NOT EXISTS figure_json TEXT;'),
+        text(
+            'ALTER TABLE saved_chart '
+            "ADD COLUMN IF NOT EXISTS chart_html TEXT NOT NULL DEFAULT '';"
+        ),
+        text('ALTER TABLE saved_chart ADD COLUMN IF NOT EXISTS shared_token VARCHAR(64) UNIQUE;'),
+    ]
+
+    with db.engine.begin() as connection:
+        for statement in statements:
+            connection.execute(statement)
+
+
 with app.app_context():
     db.create_all()
+    ensure_saved_chart_schema()
 
 # Routes
 @app.route('/')
