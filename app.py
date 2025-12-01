@@ -338,9 +338,12 @@ def build_tableau_overview(df: pd.DataFrame) -> tuple[dict, list[str], list[str]
             corr_values = corr.abs()
             mask = corr_values.where(~np.eye(corr_values.shape[0], dtype=bool))
             strongest = mask.stack().sort_values(ascending=False)
-            if not strongest.empty:
-                (m1, m2), val = strongest.iloc[0]
-                overview_insights.append(f"Strongest correlation: {m1} vs {m2} (r = {val:.2f}).")
+            if not strongest.empty and not pd.isna(strongest.iloc[0]):
+                m1, m2 = strongest.index[0]
+                val = float(strongest.iloc[0])
+                overview_insights.append(
+                    f"Strongest correlation: {m1} vs {m2} (r = {val:.2f})."
+                )
 
     overview_charts_html: list[str] = []
 
