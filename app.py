@@ -254,6 +254,60 @@ def infer_column_roles(df: pd.DataFrame) -> dict:
     return roles
 
 
+def _basic_column_types(df: pd.DataFrame, *, max_category_cardinality: int = 50) -> dict[str, list[str]]:
+    """Classify dataframe columns into numeric, datetime, and categorical buckets."""
+
+    df = df.dropna(axis=1, how='all')
+    numeric_cols: list[str] = []
+    datetime_cols: list[str] = []
+    categorical_cols: list[str] = []
+
+    for col in df.columns:
+        series = df[col]
+        non_null = series.dropna()
+        if non_null.empty:
+            continue
+
+        if pd.api.types.is_datetime64_any_dtype(series):
+            datetime_cols.append(col)
+            continue
+
+        if pd.api.types.is_numeric_dtype(series):
+            coerced = pd.to_numeric(series, errors='coerce')
+            if coerced.notna().sum() == 0:
+                continue
+            if coerced.nunique(dropna=True) <= max_category_cardinality:
+                categorical_cols.append(col)
+            else:
+                numeric_cols.append(col)
+            continue
+
+        if series.dtype == 'object' or series.dtype.name == 'string' or pd.api.types.is_bool_dtype(series):
+            categorical_cols.append(col)
+
+    return {
+        "numeric": numeric_cols,
+        "datetime": datetime_cols,
+        "categorical": categorical_cols,
+    }
+
+
+def _numeric_series_map(df: pd.DataFrame) -> dict[str, pd.Series]:
+    numeric_series_map: dict[str, pd.Series] = {}
+    for col in df.columns:
+        series = pd.to_numeric(df[col], errors='coerce')
+        if series.notna().sum() > 0:
+            numeric_series_map[col] = series
+    return numeric_series_map
+
+
+def _select_primary_numeric(numeric_series_map: dict[str, pd.Series]) -> str | None:
+    if not numeric_series_map:
+        return None
+    variances = {col: series.var(skipna=True) for col, series in numeric_series_map.items()}
+    return max(variances, key=lambda c: (variances[c] if not pd.isna(variances[c]) else -np.inf), default=None)
+
+
 def build_tableau_overview(df: pd.DataFrame) -> tuple[dict, list[str], list[str]]:
     """Construct a smarter overview profile, headline insights, and charts."""
 
@@ -987,157 +1041,190 @@ def _schema_drift_message(user_id: int, original_filename: str, current_schema: 
         return '; '.join(changes)
     return None
 
+def build_generated_chart(df: pd.DataFrame) -> str:
+    """Build a sensible default Plotly chart for the dashboard hero slot."""
+
+    if df is None or df.empty:
+        return "<div class='text-muted'>No suitable data for chart.</div>"
+
+    df = df.dropna(axis=1, how='all')
+    if df.empty:
+        return "<div class='text-muted'>No suitable data for chart.</div>"
+
+    column_types = _basic_column_types(df)
+    numeric_map = _numeric_series_map(df)
+    numeric_cols = list(numeric_map.keys())
+    datetime_cols = column_types["datetime"]
+    categorical_cols = column_types["categorical"]
+
+    def _safe_html(fig) -> str:
+        fig.update_layout(margin=dict(l=40, r=20, t=60, b=40))
+        return fig.to_html(full_html=False)
+
+    if datetime_cols and numeric_cols:
+        time_col = datetime_cols[0]
+        y_col = _select_primary_numeric(numeric_map) or numeric_cols[0]
+        time_df = df[[time_col]].copy()
+        time_df[time_col] = pd.to_datetime(time_df[time_col], errors='coerce', utc=True)
+        time_df[y_col] = numeric_map[y_col]
+        time_df = time_df.dropna(subset=[time_col, y_col]).sort_values(time_col)
+        if not time_df.empty:
+            fig = px.line(time_df, x=time_col, y=y_col, title=f"Trend of {y_col} over time")
+            return _safe_html(fig)
+
+    if len(numeric_cols) == 1 and categorical_cols:
+        metric = numeric_cols[0]
+        cat = categorical_cols[0]
+        work_df = df[[cat]].copy()
+        work_df[metric] = numeric_map[metric]
+        grouped = work_df.groupby(cat)[metric].mean(numeric_only=True).reset_index()
+        if grouped.empty:
+            return "<div class='text-muted'>No suitable data for chart.</div>"
+        grouped = grouped.sort_values(metric, ascending=False)
+        if grouped[cat].nunique(dropna=True) > 50:
+            grouped = grouped.head(20)
+        fig = px.bar(grouped, x=cat, y=metric, title=f"Average {metric} by {cat}")
+        return _safe_html(fig)
+
+    if len(numeric_cols) == 1:
+        metric = numeric_cols[0]
+        series = numeric_map[metric].dropna()
+        if not series.empty:
+            fig = px.histogram(series, x=series, nbins=30, title=f"Distribution of {metric}")
+            return _safe_html(fig)
+
+    if len(numeric_cols) >= 2:
+        corr_df = pd.DataFrame({col: numeric_map[col] for col in numeric_cols})
+        corr = corr_df.corr().fillna(0)
+        if not corr.empty:
+            fig = px.imshow(
+                corr,
+                text_auto='.2f',
+                color_continuous_scale='Blues',
+                title='Correlation heatmap',
+                labels={'color': 'Correlation'},
+            )
+            return _safe_html(fig)
+
+    if categorical_cols:
+        cat = categorical_cols[0]
+        counts = df[cat].value_counts(dropna=True).head(20).reset_index()
+        if not counts.empty:
+            counts.columns = [cat, 'Count']
+            fig = px.bar(counts, x=cat, y='Count', title=f"Counts of {cat}")
+            return _safe_html(fig)
+
+    return "<div class='text-muted'>No suitable data for chart.</div>"
+
+
+
 def generate_chart_suggestions(df, max_suggestions=10):
     suggestions = []
     df = df.dropna(axis=1, how='all')
+    if df.empty:
+        return [{
+            "title": "No suitable data for chart.",
+            "chart_type": None,
+            "x": None,
+            "y": None,
+            "score": 0,
+        }]
 
-    numeric_series_map: dict[str, pd.Series] = {}
-    for col in df.columns:
-        coerced = pd.to_numeric(df[col], errors='coerce')
-        if coerced.notna().sum() > 0:
-            numeric_series_map[col] = coerced
+    column_types = _basic_column_types(df)
+    numeric_series_map = _numeric_series_map(df)
     numeric_cols = list(numeric_series_map.keys())
-    numeric_df = df.copy()
-    for col, series in numeric_series_map.items():
-        numeric_df[col] = series
+    datetime_cols = column_types["datetime"]
+    categorical_cols = column_types["categorical"]
 
-    categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
-    datetime_cols = [
-        column
-        for column in df.columns
-        if pd.api.types.is_datetime64_any_dtype(df[column])
-    ]
+    if datetime_cols and numeric_cols:
+        time_col = datetime_cols[0]
+        metric = _select_primary_numeric(numeric_series_map) or numeric_cols[0]
+        time_df = df[[time_col]].copy()
+        time_df[time_col] = pd.to_datetime(time_df[time_col], errors='coerce', utc=True)
+        time_df[metric] = numeric_series_map[metric]
+        time_df = time_df.dropna(subset=[time_col, metric])
+        if not time_df.empty:
+            variability = float(time_df[metric].var(skipna=True) or 0)
+            suggestions.append({
+                "title": f"Trend of {metric} over {time_col}",
+                "chart_type": "line",
+                "x": time_col,
+                "y": metric,
+                "score": variability + 1.0,
+            })
 
-    # 1. Time trends: look for columns that change steadily over time
-    for tcol in datetime_cols:
-        for num in numeric_cols:
-            non_missing = numeric_df[[tcol, num]].dropna()
-            if len(non_missing) < 5:
-                continue
-
-            non_missing = non_missing.sort_values(by=tcol)
-            values = non_missing[num].values
-            if len(values) > 1:
-                corr_time = pd.Series(range(len(values))).corr(pd.Series(values))
-                score = float(abs(corr_time))
-                if score > 0.3:  # modest trend threshold
-                    suggestions.append({
-                        "title": f"Trend of {num} over {tcol} (trend strength {score:.2f})",
-                        "chart_type": "line",
-                        "x": tcol,
-                        "y": num,
-                        "score": score + 1.0  # bump time charts slightly
-                    })
-
-    # 2. Category vs numeric: only if categories differ meaningfully
-    for cat in categorical_cols:
-        unique_count = df[cat].nunique()
-        if unique_count < 2 or unique_count > 20:
-            continue
-
-        for num in numeric_cols:
-            group_means = numeric_df.groupby(cat)[num].mean()
-            if group_means.empty or group_means.std() == 0:
-                continue
-            # relative variability of group means
-            var_ratio = group_means.std() / (group_means.mean() + 1e-9)
-            score = float(min(var_ratio, 1.0))
-            if score > 0.15:  # meaningful group separation
+    if len(numeric_cols) >= 2:
+        corr_df = pd.DataFrame({col: numeric_series_map[col] for col in numeric_cols})
+        corr = corr_df.corr()
+        if not corr.empty:
+            strongest_pair = corr.abs().where(~np.eye(len(corr), dtype=bool)).stack().sort_values(ascending=False)
+            if not strongest_pair.empty:
+                c1, c2 = strongest_pair.index[0]
+                corr_val = float(strongest_pair.iloc[0])
                 suggestions.append({
-                    "title": f"Average {num} by {cat} (variation {score:.2f})",
-                    "chart_type": "bar",
-                    "x": cat,
-                    "y": num,
-                    "score": score + 0.5
+                    "title": "Correlation heatmap for numeric columns",
+                    "chart_type": "heatmap",
+                    "x": c1,
+                    "y": c2,
+                    "score": corr_val + 0.8,
                 })
-        if unique_count <= 8:
-            # pie charts for small, diverse categories
-            counts = df[cat].value_counts(normalize=True)
-            balance = float(1 - abs(counts.max() - counts.mean()))  # penalize dominance
-            if balance > 0.4:
                 suggestions.append({
-                    "title": f"Distribution of {cat}",
-                    "chart_type": "pie",
-                    "x": cat,
-                    "y": None,
-                    "score": balance
-                })
-
-    # 3. Numeric vs numeric: measure actual correlation strength
-    for i, c1 in enumerate(numeric_cols):
-        for c2 in numeric_cols[i+1:]:
-            subset = numeric_df[[c1, c2]].dropna()
-            if len(subset) < 5:
-                continue
-            corr = subset[c1].corr(subset[c2])
-            if pd.isna(corr):
-                continue
-            if abs(corr) >= 0.5:
-                suggestions.append({
-                    "title": f"Correlation between {c1} and {c2} (r={corr:.2f})",
+                    "title": f"Scatter: {c1} vs {c2} (r={corr_val:.2f})",
                     "chart_type": "scatter",
                     "x": c1,
                     "y": c2,
-                    "score": float(abs(corr) + 1.2)  # rank strong correlations highest
+                    "score": corr_val + 0.6,
                 })
 
-    # Always include a baseline numeric distribution suggestion when numeric data exists
-    if numeric_cols:
-        numeric_var = {col: numeric_series_map[col].var(skipna=True) for col in numeric_cols}
-        primary_numeric = max(numeric_var, key=lambda c: (numeric_var[c] if not pd.isna(numeric_var[c]) else -np.inf), default=None)
-        if primary_numeric and not pd.isna(numeric_var.get(primary_numeric, np.nan)):
-            base_title = f"Distribution of {primary_numeric}"
-            if not any(s.get("title") == base_title for s in suggestions):
-                suggestions.append({
-                    "title": base_title,
-                    "chart_type": "histogram",
-                    "x": primary_numeric,
-                    "y": None,
-                    "score": float(max(numeric_var.get(primary_numeric, 0), 0.25) + 0.4),
-                })
+    if len(numeric_cols) == 1 and categorical_cols:
+        metric = numeric_cols[0]
+        cat = categorical_cols[0]
+        work_df = df[[cat]].copy()
+        work_df[metric] = numeric_series_map[metric]
+        grouped = work_df.groupby(cat)[metric].mean(numeric_only=True)
+        if not grouped.empty:
+            variability = float(grouped.std() / (abs(grouped.mean()) + 1e-9)) if grouped.mean() != 0 else float(grouped.std())
+            suggestions.append({
+                "title": f"Average {metric} by {cat}",
+                "chart_type": "bar",
+                "x": cat,
+                "y": metric,
+                "score": variability + 0.5,
+            })
 
-    # Rank and trim
-    if not suggestions:
-        fallback_suggestions = []
-        if datetime_cols and numeric_cols:
-            fallback_suggestions.append({
-                "title": f"Trend of {numeric_cols[0]} over {datetime_cols[0]}",
-                "chart_type": "line",
-                "x": datetime_cols[0],
-                "y": numeric_cols[0],
+    if len(numeric_cols) == 1 and not categorical_cols:
+        metric = numeric_cols[0]
+        suggestions.append({
+            "title": f"Distribution of {metric}",
+            "chart_type": "histogram",
+            "x": metric,
+            "y": None,
+            "score": float(abs(numeric_series_map[metric].var(skipna=True) or 0) + 0.4),
+        })
+
+    if not numeric_cols and categorical_cols:
+        cat = categorical_cols[0]
+        if df[cat].nunique(dropna=True) > 1:
+            suggestions.append({
+                "title": f"Counts of top {cat} values",
+                "chart_type": "bar",  # handled as count plot
+                "x": cat,
+                "y": None,
                 "score": 0.3,
             })
-        if numeric_cols:
-            fallback_suggestions.append({
-                "title": f"Distribution of {numeric_cols[0]}",
-                "chart_type": "histogram",
-                "x": numeric_cols[0],
-                "y": None,
-                "score": 0.25,
-            })
-        if categorical_cols and numeric_cols:
-            fallback_suggestions.append({
-                "title": f"Average {numeric_cols[0]} by {categorical_cols[0]}",
-                "chart_type": "bar",
-                "x": categorical_cols[0],
-                "y": numeric_cols[0],
-                "score": 0.2,
-            })
 
-        if fallback_suggestions:
-            suggestions = fallback_suggestions
-        else:
-            fallback_message = (
-                "No strong chart suggestions found. Try exploring columns manually "
-                "or adjust thresholds."
-            )
-            return [{
-                "title": fallback_message,
-                "chart_type": None,
-                "x": None,
-                "y": None,
-                "score": 0
-            }]
+    if not suggestions:
+        fallback_message = (
+            "No strong chart suggestions found. Try exploring columns manually "
+            "or adjust thresholds."
+        )
+        return [{
+            "title": fallback_message,
+            "chart_type": None,
+            "x": None,
+            "y": None,
+            "score": 0,
+        }]
 
     suggestions = sorted(suggestions, key=lambda s: s["score"], reverse=True)
     return suggestions[:max_suggestions]
@@ -1258,6 +1345,7 @@ def dashboard():
     dataset_summary: dict = {}
     overview_insights: list[str] = []
     overview_charts_html: list[str] = []
+    chart_html: str | None = None
 
     if not filename and uploads:
         filename = uploads[0].filename
@@ -1289,6 +1377,7 @@ def dashboard():
                 quality_signals = _data_quality_signals(analysis_df)
                 extra_insights = _generate_additional_insights(analysis_df)
                 dataset_synopsis = _dataset_brief(analysis_df)
+                chart_html = build_generated_chart(analysis_df)
             except Exception as e:
                 flash(f"Error loading file '{filename}': {e}")
         else:
@@ -1316,6 +1405,7 @@ def dashboard():
         dataset_summary=dataset_summary,
         overview_insights=overview_insights,
         overview_charts_html=overview_charts_html,
+        chart=chart_html,
     )
 
 @app.route('/upload', methods=['POST'])
@@ -1341,6 +1431,7 @@ def upload():
     dataset_summary: dict = {}
     overview_insights: list[str] = []
     overview_charts_html: list[str] = []
+    chart_html: str | None = None
 
     if google_sheet_url:
         try:
@@ -1386,6 +1477,7 @@ def upload():
         suggestions = generate_chart_suggestions(analysis_df)
         dataset_type, trading_charts, data_health_charts, chart_notes = _prepare_visual_context(analysis_df)
         table_html, columns = _render_preview_table(df)
+        chart_html = build_generated_chart(analysis_df)
         db.session.commit()
         _save_profile(new_upload, analysis_df)
         db.session.commit()
@@ -1439,6 +1531,7 @@ def upload():
         dataset_summary=dataset_summary,
         overview_insights=overview_insights,
         overview_charts_html=overview_charts_html,
+        chart=chart_html,
     )
 
 @app.route('/visualize', methods=['POST'])
@@ -1464,7 +1557,8 @@ def visualize():
     if not filename or not x_column or not chart_type:
         flash("Missing form data")
         return redirect(url_for('dashboard'))
-    if chart_type != 'pie' and not y_column:
+    needs_y = chart_type not in {'pie', 'histogram', 'heatmap'} and not (chart_type == 'bar' and not y_column)
+    if needs_y and not y_column:
         flash('Y axis is required for this chart type')
         return redirect(url_for('dashboard'))
 
@@ -1493,11 +1587,35 @@ def visualize():
             value_counts.columns = [x_column, 'Count']
             fig = px.pie(value_counts, names=x_column, values='Count')
         elif chart_type == 'bar':
-            fig = px.bar(df, x=x_column, y=y_column)
+            if y_column:
+                fig = px.bar(df, x=x_column, y=y_column)
+            else:
+                counts = df[x_column].value_counts(dropna=True).head(20).reset_index()
+                if counts.empty:
+                    raise ValueError('No suitable data for bar chart.')
+                counts.columns = [x_column, 'Count']
+                fig = px.bar(counts, x=x_column, y='Count')
         elif chart_type == 'line':
-            fig = px.line(df, x=x_column, y=y_column)
+            fig = px.line(df.sort_values(by=x_column), x=x_column, y=y_column)
         elif chart_type == 'scatter':
             fig = px.scatter(df, x=x_column, y=y_column)
+        elif chart_type == 'histogram':
+            series = pd.to_numeric(df[x_column], errors='coerce').dropna()
+            if series.empty:
+                raise ValueError('No numeric data available for histogram.')
+            fig = px.histogram(series, x=series, nbins=30, title=f"Distribution of {x_column}")
+        elif chart_type == 'heatmap':
+            numeric_df = df.select_dtypes(include=['number']).apply(pd.to_numeric, errors='coerce')
+            corr = numeric_df.corr().fillna(0)
+            if corr.empty:
+                raise ValueError('No numeric columns available for heatmap.')
+            fig = px.imshow(
+                corr,
+                text_auto='.2f',
+                color_continuous_scale='Blues',
+                title='Correlation heatmap',
+                labels={'color': 'Correlation'},
+            )
         elif chart_type == 'scatter_map':
             if not MAPBOX_TOKEN:
                 flash('Mapbox token missing; map charts may not render correctly.')
