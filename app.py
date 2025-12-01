@@ -1467,6 +1467,15 @@ def dashboard():
             flash('Selected file not found on disk')
 
     suggestions = suggestions or []
+    display_chart_html = chart_html or generated_chart_html
+    display_figure_json = generated_figure_json
+    display_x_column = generated_x_column
+    display_y_column = generated_y_column
+
+    display_chart_html = chart_html or generated_chart_html
+    display_figure_json = generated_figure_json
+    display_x_column = generated_x_column
+    display_y_column = generated_y_column
 
     return render_template(
         'dashboard.html',
@@ -1493,6 +1502,10 @@ def dashboard():
         generated_figure_json=generated_figure_json,
         generated_x_column=generated_x_column,
         generated_y_column=generated_y_column,
+        display_chart_html=display_chart_html,
+        display_figure_json=display_figure_json,
+        display_x_column=display_x_column,
+        display_y_column=display_y_column,
         current_upload=selected_upload,
     )
 
@@ -1629,6 +1642,10 @@ def upload():
         generated_figure_json=generated_figure_json,
         generated_x_column=generated_x_column,
         generated_y_column=generated_y_column,
+        display_chart_html=display_chart_html,
+        display_figure_json=display_figure_json,
+        display_x_column=display_x_column,
+        display_y_column=display_y_column,
         current_upload=new_upload,
     )
 
@@ -1798,6 +1815,11 @@ def visualize():
         summary = _summarise_dataframe(analysis_df)
         dataset_synopsis = _dataset_brief(analysis_df)
 
+        display_chart_html = chart_html or generated_chart_html
+        display_figure_json = figure_json or generated_figure_json
+        display_x_column = x_column
+        display_y_column = y_column
+
         return render_template(
             'dashboard.html',
             user=session['user'],
@@ -1833,6 +1855,10 @@ def visualize():
             generated_figure_json=generated_figure_json,
             generated_x_column=generated_x_column,
             generated_y_column=generated_y_column,
+            display_chart_html=display_chart_html,
+            display_figure_json=display_figure_json,
+            display_x_column=display_x_column,
+            display_y_column=display_y_column,
             current_upload=upload,
         )
 

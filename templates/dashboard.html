@@ -89,26 +89,26 @@
       {% endif %}
     {% endwith %}
 
-    {% if generated_chart_html or chart %}
+    {% if display_chart_html %}
       <div class="card mt-3 mb-4">
         <div class="card-header">Generated Chart</div>
         <div class="card-body">
-          {{ (generated_chart_html or chart)|safe }}
+          {{ display_chart_html|safe }}
 
           {% if current_upload %}
             <form method="POST" action="{{ url_for('save_generated_chart', filename=selected_file) }}" class="mt-3">
               <input type="hidden" name="upload_id" value="{{ current_upload.id }}">
-              {% if generated_figure_json %}
-                <input type="hidden" name="figure_json" value='{{ generated_figure_json|e }}'>
+              {% if display_figure_json %}
+                <input type="hidden" name="figure_json" value='{{ display_figure_json|e }}'>
               {% endif %}
-              {% if generated_chart_html or chart %}
-                <input type="hidden" name="chart_html" value='{{ (generated_chart_html or chart)|e }}'>
+              {% if display_chart_html %}
+                <input type="hidden" name="chart_html" value='{{ display_chart_html|e }}'>
               {% endif %}
-              {% if generated_x_column %}
-                <input type="hidden" name="x_column" value="{{ generated_x_column }}">
+              {% if display_x_column %}
+                <input type="hidden" name="x_column" value="{{ display_x_column }}">
               {% endif %}
-              {% if generated_y_column %}
-                <input type="hidden" name="y_column" value="{{ generated_y_column }}">
+              {% if display_y_column %}
+                <input type="hidden" name="y_column" value="{{ display_y_column }}">
               {% endif %}
 
               <div class="row g-2 align-items-center">
