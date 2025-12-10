@@ -1414,9 +1414,14 @@ def dashboard():
     overview_insights: list[str] = []
     overview_charts_html: list[str] = []
     chart_html: str | None = None
+    generated_chart_html: str | None = None
     generated_figure_json: str | None = None
     generated_x_column: str | None = None
     generated_y_column: str | None = None
+    display_chart_html: str | None = None
+    display_figure_json: str | None = None
+    display_x_column: str | None = None
+    display_y_column: str | None = None
     saved_chart_views: list[dict] = []
 
     selected_upload = None
@@ -1456,7 +1461,7 @@ def dashboard():
                 extra_insights = _generate_additional_insights(analysis_df)
                 dataset_synopsis = _dataset_brief(analysis_df)
                 (
-                    chart_html,
+                    generated_chart_html,
                     generated_figure_json,
                     generated_x_column,
                     generated_y_column,
@@ -1467,11 +1472,6 @@ def dashboard():
             flash('Selected file not found on disk')
 
     suggestions = suggestions or []
-    display_chart_html = chart_html or generated_chart_html
-    display_figure_json = generated_figure_json
-    display_x_column = generated_x_column
-    display_y_column = generated_y_column
-
     display_chart_html = chart_html or generated_chart_html
     display_figure_json = generated_figure_json
     display_x_column = generated_x_column
@@ -1498,7 +1498,7 @@ def dashboard():
         overview_insights=overview_insights,
         overview_charts_html=overview_charts_html,
         chart=chart_html,
-        generated_chart_html=chart_html,
+        generated_chart_html=generated_chart_html,
         generated_figure_json=generated_figure_json,
         generated_x_column=generated_x_column,
         generated_y_column=generated_y_column,
@@ -1579,11 +1579,15 @@ def upload():
         dataset_type, trading_charts, data_health_charts, chart_notes = _prepare_visual_context(analysis_df)
         table_html, columns = _render_preview_table(df)
         (
-            chart_html,
+            generated_chart_html,
             generated_figure_json,
             generated_x_column,
             generated_y_column,
         ) = build_generated_chart(analysis_df)
+        display_chart_html = generated_chart_html
+        display_figure_json = generated_figure_json
+        display_x_column = generated_x_column
+        display_y_column = generated_y_column
         db.session.commit()
         _save_profile(new_upload, analysis_df)
         db.session.commit()
@@ -1637,8 +1641,8 @@ def upload():
         dataset_summary=dataset_summary,
         overview_insights=overview_insights,
         overview_charts_html=overview_charts_html,
-        chart=chart_html,
-        generated_chart_html=chart_html,
+        chart=generated_chart_html,
+        generated_chart_html=generated_chart_html,
         generated_figure_json=generated_figure_json,
         generated_x_column=generated_x_column,
         generated_y_column=generated_y_column,
