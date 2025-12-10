@@ -6,4 +6,3 @@ numpy
 plotly
 gunicorn
 psycopg2-binary
-openpyxl

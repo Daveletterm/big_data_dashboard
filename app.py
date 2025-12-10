@@ -17,7 +17,6 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.io as pio
-from sqlalchemy import text
 from plotly.io import to_html
 from plotly.utils import PlotlyJSONEncoder
 import json
@@ -99,42 +98,18 @@ def _validate_upload_file(file) -> None:
     allowed_mimes = {
         'text/csv',
         'application/csv',
-        'application/vnd.ms-excel',
-        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     }
-    allowed_extensions = {'.csv', '.xlsx', '.xls'}
+    allowed_extensions = {'.csv'}
 
     mime_guess, _ = mimetypes.guess_type(file.filename)
     content_type = (file.mimetype or '').split(';')[0].strip()
     extension = Path(file.filename).suffix.lower()
 
     if extension not in allowed_extensions:
-        raise ValueError('Invalid file type. Please upload a CSV or Excel file.')
+        raise ValueError('Invalid file type. Please upload a CSV file.')
 
     if content_type and content_type not in allowed_mimes and mime_guess not in allowed_mimes:
-        raise ValueError('Invalid file type. Please upload a CSV or Excel file.')
-
-
-_GSHEET_PATTERN = re.compile(r"docs\.google\.com/spreadsheets/d/([a-zA-Z0-9-_]+)")
-
-
-def _google_sheet_export_url(url: str) -> str:
-    match = _GSHEET_PATTERN.search(url)
-    if not match:
-        raise ValueError('Please provide a valid Google Sheets sharing link.')
-
-    sheet_id = match.group(1)
-    gid_match = re.search(r"gid=([0-9]+)", url)
-    gid_suffix = f"&gid={gid_match.group(1)}" if gid_match else ""
-    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv{gid_suffix}"
-
-
-def _load_google_sheet(url: str) -> pd.DataFrame:
-    export_url = _google_sheet_export_url(url)
-    df = pd.read_csv(export_url)
-    if df.empty:
-        raise ValueError('The provided Google Sheet is empty or could not be read.')
-    return df
+        raise ValueError('Invalid file type. Please upload a CSV file.')
 
 
 def _enforce_dataframe_limits(df: pd.DataFrame, max_rows: int = 150_000, max_cols: int = 150) -> pd.DataFrame:
@@ -476,65 +451,17 @@ def build_tableau_overview(df: pd.DataFrame) -> tuple[dict, list[str], list[str]
     return dataset_summary, overview_insights, overview_charts_html
 
 
-TRADING_CORE_COLUMNS = {
-    'row_type',
-    'symbol',
-    'asset_class',
-    'qty',
-    'avg_entry_price',
-    'current_price',
-    'market_value',
-    'unrealized_pl',
-    'unrealized_plpc',
-}
-
-TRADING_OPTIONAL_COLUMNS = {
-    'mode_or_strategy',
-    'strategy_name',
-    'realized_pl',
-    'realized_plpc',
-}
-
-
-def classify_dataset(df: pd.DataFrame) -> str:
-    """Classify the dataset to switch between generic and trading views."""
-
-    lowered = {col.lower() for col in df.columns}
-    if TRADING_CORE_COLUMNS.issubset(lowered):
-        return "trading_paper_trades"
-    return "generic"
-
-
-def split_trading_frames(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Split a trading CSV into account, position, and trade frames."""
-
-    if 'row_type' not in df.columns:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
-    normalized = df.copy()
-    normalized['row_type'] = normalized['row_type'].astype(str).str.lower()
-    account_df = normalized[normalized['row_type'] == 'account_summary'].copy()
-    positions_df = normalized[normalized['row_type'] == 'position'].copy()
-    trades_df = normalized[normalized['row_type'] == 'trade'].copy()
-    return account_df, positions_df, trades_df
-
-
 def _load_dataframe(data_path: Path, max_rows: int = 150_000) -> pd.DataFrame:
-    """Load a CSV or Excel file into a cleaned dataframe with limits and streaming."""
+    """Load a CSV file into a cleaned dataframe with limits and streaming."""
 
-    suffix = data_path.suffix.lower()
-
-    if suffix in {'.xlsx', '.xls'}:
-        df = pd.read_excel(data_path)
-    else:
-        dfs = []
-        rows_read = 0
-        for chunk in pd.read_csv(data_path, chunksize=25_000, low_memory=False):
-            dfs.append(chunk)
-            rows_read += len(chunk)
-            if rows_read >= max_rows:
-                break
-        df = pd.concat(dfs, ignore_index=True)
+    dfs = []
+    rows_read = 0
+    for chunk in pd.read_csv(data_path, chunksize=25_000, low_memory=False):
+        dfs.append(chunk)
+        rows_read += len(chunk)
+        if rows_read >= max_rows:
+            break
+    df = pd.concat(dfs, ignore_index=True)
 
     df.columns = df.columns.str.strip()
     df.columns = _ensure_unique_columns(df.columns)
@@ -659,252 +586,6 @@ def _dataset_brief(df: pd.DataFrame) -> str:
     return "; ".join(parts)
 
 
-def _chart_payload(title: str, description: str, fig) -> dict[str, str]:
-    return {
-        'title': title,
-        'description': description,
-        'html': fig.to_html(full_html=False),
-    }
-
-
-def _build_trading_visuals(df: pd.DataFrame) -> tuple[list[dict[str, str]], list[dict[str, str]], list[str]]:
-    """Construct trading-specific visuals and supporting data health charts."""
-
-    trading_charts: list[dict[str, str]] = []
-    chart_notes: list[str] = []
-    account_df, positions_df, trades_df = split_trading_frames(df)
-
-    # Equity curve
-    if not account_df.empty:
-        value_col = None
-        if 'equity' in account_df.columns:
-            value_col = 'equity'
-        elif 'portfolio_value' in account_df.columns:
-            value_col = 'portfolio_value'
-
-        if value_col and 'timestamp' in account_df.columns:
-            account_df = account_df.copy()
-            account_df['timestamp'] = pd.to_datetime(account_df['timestamp'], errors='coerce')
-            account_df = account_df.dropna(subset=['timestamp', value_col]).sort_values('timestamp')
-            if not account_df.empty:
-                fig_equity = px.line(
-                    account_df,
-                    x='timestamp',
-                    y=value_col,
-                    title='Equity over time',
-                )
-                fig_equity.update_layout(yaxis_title='Equity' if value_col == 'equity' else 'Portfolio value')
-                trading_charts.append(
-                    _chart_payload(
-                        'Equity over time',
-                        'Tracks account equity based on account_summary rows in the CSV.',
-                        fig_equity,
-                    )
-                )
-            else:
-                chart_notes.append('Skipped equity curve: timestamp or equity values were missing after cleaning.')
-        else:
-            chart_notes.append("Skipped equity curve: required columns 'timestamp' and 'equity'/'portfolio_value' not found.")
-
-    # Open positions overview
-    if not positions_df.empty:
-        positions_df = positions_df.copy()
-        if 'market_value' in positions_df.columns:
-            positions_df['market_value'] = pd.to_numeric(positions_df['market_value'], errors='coerce')
-        else:
-            positions_df['market_value'] = np.nan
-        if 'unrealized_pl' in positions_df.columns:
-            positions_df['unrealized_pl'] = pd.to_numeric(positions_df['unrealized_pl'], errors='coerce')
-        top_positions = positions_df.sort_values('market_value', ascending=False).head(20)
-        if 'symbol' in top_positions.columns and top_positions['market_value'].notna().any():
-            fig_positions = px.bar(
-                top_positions,
-                x='symbol',
-                y='market_value',
-                title='Open positions by market value',
-                hover_data=['asset_class', 'qty', 'avg_entry_price', 'current_price', 'unrealized_pl', 'unrealized_plpc'],
-            )
-            fig_positions.update_layout(yaxis_title='Market value', xaxis_title='Symbol')
-            trading_charts.append(
-                _chart_payload(
-                    'Open positions by market value',
-                    'Shows where capital is allocated right now, sorted by position size.',
-                    fig_positions,
-                )
-            )
-        else:
-            chart_notes.append('Skipped positions overview: missing symbol or market_value data.')
-
-        if top_positions['unrealized_pl'].notna().any():
-            fig_unrealized = px.bar(
-                top_positions.sort_values('unrealized_pl', ascending=False),
-                x='symbol',
-                y='unrealized_pl',
-                title='Unrealized P/L by symbol',
-                color='unrealized_pl',
-                color_continuous_scale='RdYlGn',
-            )
-            fig_unrealized.update_layout(yaxis_title='Unrealized P/L', xaxis_title='Symbol', coloraxis_showscale=False)
-            trading_charts.append(
-                _chart_payload(
-                    'Unrealized P/L by symbol',
-                    'Highlights winners and losers among open positions using unrealized profit/loss.',
-                    fig_unrealized,
-                )
-            )
-    else:
-        chart_notes.append('Skipped positions overview: no position rows detected.')
-
-    # Strategy performance breakdown
-    if not trades_df.empty:
-        trades_df = trades_df.copy()
-        if 'realized_pl' in trades_df.columns:
-            trades_df['realized_pl'] = pd.to_numeric(trades_df['realized_pl'], errors='coerce')
-        strategy_field = 'strategy_name' if 'strategy_name' in trades_df.columns else 'mode_or_strategy'
-
-        if strategy_field in trades_df.columns:
-            grouped = trades_df.groupby(strategy_field)
-            aggregated = grouped['realized_pl'].agg(['sum', 'count', 'mean']) if 'realized_pl' in trades_df.columns else None
-            if aggregated is not None and aggregated['sum'].notna().any():
-                aggregated = aggregated.rename(columns={'sum': 'total_realized_pl', 'count': 'trade_count', 'mean': 'avg_realized_pl'})
-                fig_strategy = px.bar(
-                    aggregated.reset_index(),
-                    x=strategy_field,
-                    y='total_realized_pl',
-                    title='Strategy performance (realized P/L)',
-                    hover_data=['trade_count', 'avg_realized_pl'],
-                )
-                fig_strategy.update_layout(yaxis_title='Total realized P/L', xaxis_title='Strategy')
-                trading_charts.append(
-                    _chart_payload(
-                        'Strategy performance (realized P/L)',
-                        'Aggregates realized profit and trade count per strategy or mode to reveal what is working.',
-                        fig_strategy,
-                    )
-                )
-            else:
-                volume = grouped.size().reset_index(name='trade_count')
-                fig_volume = px.bar(
-                    volume,
-                    x=strategy_field,
-                    y='trade_count',
-                    title='Trade volume by strategy',
-                )
-                fig_volume.update_layout(yaxis_title='Trade count', xaxis_title='Strategy')
-                trading_charts.append(
-                    _chart_payload(
-                        'Trade volume by strategy',
-                        'Counts trades per strategy when realized profit/loss is unavailable.',
-                        fig_volume,
-                    )
-                )
-        else:
-            chart_notes.append('Skipped strategy performance: no strategy identifiers found.')
-
-        # Symbol performance
-        trades_df['symbol'] = trades_df.get('symbol')
-        if 'symbol' in trades_df.columns:
-            symbol_grouped = trades_df.groupby('symbol')
-            symbol_perf = symbol_grouped['realized_pl'].agg(['sum', 'count']) if 'realized_pl' in trades_df.columns else None
-            if symbol_perf is not None and symbol_perf['sum'].notna().any():
-                symbol_perf = symbol_perf.rename(columns={'sum': 'total_realized_pl', 'count': 'trade_count'})
-                top_symbols = symbol_perf.reindex(symbol_perf['total_realized_pl'].abs().sort_values(ascending=False).head(20).index)
-                fig_symbol = px.bar(
-                    top_symbols.reset_index(),
-                    x='symbol',
-                    y='total_realized_pl',
-                    title='Symbol performance (realized P/L)',
-                    color='total_realized_pl',
-                    color_continuous_scale='RdYlGn',
-                )
-                fig_symbol.update_layout(yaxis_title='Total realized P/L', xaxis_title='Symbol', coloraxis_showscale=False)
-                trading_charts.append(
-                    _chart_payload(
-                        'Symbol performance (realized P/L)',
-                        'Ranks symbols by realized profit/loss to spotlight the biggest contributors.',
-                        fig_symbol,
-                    )
-                )
-            else:
-                trade_counts = symbol_grouped.size().reset_index(name='trade_count')
-                fig_symbol_volume = px.bar(
-                    trade_counts.sort_values('trade_count', ascending=False).head(20),
-                    x='symbol',
-                    y='trade_count',
-                    title='Trade volume by symbol',
-                )
-                fig_symbol_volume.update_layout(yaxis_title='Trade count', xaxis_title='Symbol')
-                trading_charts.append(
-                    _chart_payload(
-                        'Trade volume by symbol',
-                        'Counts trades per symbol when realized profit/loss is unavailable.',
-                        fig_symbol_volume,
-                    )
-                )
-        else:
-            chart_notes.append('Skipped symbol performance: symbol column not found in trades.')
-
-        # Trade timeline
-        if 'timestamp' in trades_df.columns and 'side' in trades_df.columns:
-            price_candidates = [
-                col for col in ['filled_avg_price', 'avg_entry_price', 'current_price'] if col in trades_df.columns
-            ]
-            price_col = price_candidates[0] if price_candidates else None
-            trades_df['timestamp'] = pd.to_datetime(trades_df['timestamp'], errors='coerce')
-            if price_col:
-                timeline_df = trades_df.dropna(subset=['timestamp', price_col, 'side']).sort_values('timestamp')
-                if not timeline_df.empty:
-                    fig_timeline = px.scatter(
-                        timeline_df,
-                        x='timestamp',
-                        y=price_col,
-                        color='side',
-                        title='Trade timeline',
-                        symbol='side',
-                        hover_data=['symbol', 'qty', price_col],
-                    )
-                    fig_timeline.update_layout(xaxis_title='Timestamp', yaxis_title=price_col.replace('_', ' ').title())
-                    trading_charts.append(
-                        _chart_payload(
-                            'Trade timeline',
-                            'Plots trade timestamps and prices to reveal entry/exit timing by side.',
-                            fig_timeline,
-                        )
-                    )
-                else:
-                    chart_notes.append('Skipped trade timeline: missing timestamp or price data after cleaning.')
-            else:
-                chart_notes.append('Skipped trade timeline: no price column (filled_avg_price/avg_entry_price/current_price) available.')
-        else:
-            chart_notes.append("Skipped trade timeline: required columns 'timestamp' and 'side' not found.")
-    else:
-        chart_notes.append('Skipped trading visuals: no trade rows detected.')
-
-    # Data health visuals removed.
-    data_health_charts: list[dict[str, str]] = []
-    return trading_charts, data_health_charts, chart_notes
-
-
-def _build_generic_visuals(df: pd.DataFrame) -> tuple[list[dict[str, str]], list[str]]:
-    # Data health visuals removed.
-    return [], []
-
-
-def _prepare_visual_context(df: pd.DataFrame) -> tuple[str, list[dict[str, str]], list[dict[str, str]], list[str]]:
-    dataset_type = classify_dataset(df)
-    if dataset_type == 'trading_paper_trades':
-        trading_charts, data_health_charts, chart_notes = _build_trading_visuals(df)
-    else:
-        trading_charts = []
-        data_health_charts, chart_notes = _build_generic_visuals(df)
-    return dataset_type, trading_charts, data_health_charts, chart_notes
-
-
-def _build_data_health_charts(df: pd.DataFrame, dataset_type: str) -> tuple[list[dict[str, str]], list[str]]:
-    # Data health visuals (correlation and null heatmaps) are disabled in the stripped-down app.
-    return [], []
-
-
 def _render_preview_table(df: pd.DataFrame) -> tuple[str, list[str]]:
     preview_df = df.head(100)
     table_html = preview_df.to_html(classes='table table-striped table-bordered', index=False)
@@ -912,48 +593,6 @@ def _render_preview_table(df: pd.DataFrame) -> tuple[str, list[str]]:
     return table_html, columns
 
 
-def _save_profile(upload: Upload, df: pd.DataFrame) -> None:
-    schema = {col: str(dtype) for col, dtype in df.dtypes.items()}
-    null_summary = df.isnull().sum().to_dict()
-    quality_notes = _data_quality_signals(df)
-    profile = DatasetProfile(
-        upload_id=upload.id,
-        schema=json.dumps(schema),
-        null_summary=json.dumps(null_summary),
-        quality_notes=json.dumps(quality_notes)
-    )
-    db.session.add(profile)
-
-
-def _schema_drift_message(user_id: int, original_filename: str, current_schema: dict[str, str], *, exclude_upload_id: int | None = None) -> str | None:
-    last_upload = (
-        Upload.query
-        .filter(Upload.user_id == user_id)
-        .filter(Upload.filename.endswith(f"__{original_filename}"))
-        .filter(Upload.id != exclude_upload_id)
-        .order_by(Upload.timestamp.desc())
-        .first()
-    )
-    if not last_upload:
-        return None
-    profile = DatasetProfile.query.filter_by(upload_id=last_upload.id).order_by(DatasetProfile.created_at.desc()).first()
-    if not profile:
-        return None
-    previous_schema = json.loads(profile.schema)
-    added = set(current_schema) - set(previous_schema)
-    removed = set(previous_schema) - set(current_schema)
-    changes = []
-    if added:
-        changes.append(f"New columns: {', '.join(sorted(added))}")
-    if removed:
-        changes.append(f"Removed columns: {', '.join(sorted(removed))}")
-    if not changes:
-        for col, dtype in current_schema.items():
-            if col in previous_schema and previous_schema[col] != dtype:
-                changes.append(f"Column {col} type changed from {previous_schema[col]} to {dtype}")
-    if changes:
-        return '; '.join(changes)
-    return None
 
 def build_generated_chart(df: pd.DataFrame) -> tuple[str, str | None, str | None, str | None]:
     """Build a sensible default Plotly chart for the dashboard hero slot.
@@ -1157,85 +796,8 @@ class Upload(db.Model):
         return self.filename
 
 
-class SavedChart(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    upload_id = db.Column(db.Integer, db.ForeignKey('upload.id'), nullable=False)
-    title = db.Column(db.String(255), nullable=False)
-    chart_type = db.Column(db.String(50), nullable=True)
-    x_column = db.Column(db.String(255), nullable=True)
-    y_column = db.Column(db.String(255), nullable=True)
-    filter_column = db.Column(db.String(255), nullable=True)
-    filter_value = db.Column(db.String(255), nullable=True)
-    sample_fraction = db.Column(db.Float, nullable=True)
-    figure_json = db.Column(db.Text, nullable=True)
-    chart_html = db.Column(db.Text, nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
-    shared_token = db.Column(db.String(64), unique=True, nullable=True)
-
-
-class DatasetProfile(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    upload_id = db.Column(db.Integer, db.ForeignKey('upload.id'), nullable=False)
-    schema = db.Column(db.Text, nullable=False)
-    null_summary = db.Column(db.Text, nullable=True)
-    quality_notes = db.Column(db.Text, nullable=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
-
-
-def _render_saved_chart_html(saved_chart: SavedChart) -> str:
-    if saved_chart.figure_json:
-        try:
-            fig = pio.from_json(saved_chart.figure_json)
-            return fig.to_html(full_html=False, include_plotlyjs=False)
-        except Exception:
-            pass
-    return saved_chart.chart_html
-
-
-def _prepare_saved_chart_views(saved_charts: list[SavedChart]) -> list[dict]:
-    views: list[dict] = []
-    for chart in saved_charts:
-        views.append({
-            "id": chart.id,
-            "title": chart.title,
-            "created_at": chart.created_at,
-            "shared_token": chart.shared_token,
-            "chart_type": chart.chart_type,
-            "x_column": chart.x_column,
-            "y_column": chart.y_column,
-            "filter_column": chart.filter_column,
-            "filter_value": chart.filter_value,
-            "sample_fraction": chart.sample_fraction,
-            "html": _render_saved_chart_html(chart),
-        })
-    return views
-
-
-def ensure_saved_chart_schema() -> None:
-    statements = [
-        text('ALTER TABLE saved_chart ADD COLUMN IF NOT EXISTS chart_type VARCHAR(50);'),
-        text('ALTER TABLE saved_chart ADD COLUMN IF NOT EXISTS x_column VARCHAR(255);'),
-        text('ALTER TABLE saved_chart ADD COLUMN IF NOT EXISTS y_column VARCHAR(255);'),
-        text('ALTER TABLE saved_chart ADD COLUMN IF NOT EXISTS filter_column VARCHAR(255);'),
-        text('ALTER TABLE saved_chart ADD COLUMN IF NOT EXISTS filter_value VARCHAR(255);'),
-        text('ALTER TABLE saved_chart ADD COLUMN IF NOT EXISTS sample_fraction DOUBLE PRECISION;'),
-        text('ALTER TABLE saved_chart ADD COLUMN IF NOT EXISTS figure_json TEXT;'),
-        text(
-            'ALTER TABLE saved_chart '
-            "ADD COLUMN IF NOT EXISTS chart_html TEXT NOT NULL DEFAULT '';"
-        ),
-        text('ALTER TABLE saved_chart ADD COLUMN IF NOT EXISTS shared_token VARCHAR(64) UNIQUE;'),
-    ]
-
-    with db.engine.begin() as connection:
-        for statement in statements:
-            connection.execute(statement)
-
-
 with app.app_context():
     db.create_all()
-    ensure_saved_chart_schema()
 
 # Routes
 @app.route('/')
@@ -1321,8 +883,6 @@ def dashboard():
     display_figure_json: str | None = None
     display_x_column: str | None = None
     display_y_column: str | None = None
-    saved_chart_views: list[dict] = []
-
     selected_upload = None
     if not filename and uploads:
         selected_upload = uploads[0]
@@ -1330,18 +890,6 @@ def dashboard():
     elif filename:
         selected_upload = Upload.query.filter_by(filename=filename, user_id=session['user_id']).first()
 
-    if selected_upload:
-        saved_chart_views = _prepare_saved_chart_views(
-            SavedChart.query
-            .filter_by(user_id=session['user_id'], upload_id=selected_upload.id)
-            .order_by(SavedChart.created_at.desc())
-            .all()
-        )
-
-    dataset_type = 'generic'
-    trading_charts: list[dict[str, str]] = []
-    data_health_charts: list[dict[str, str]] = []
-    chart_notes: list[str] = []
     quality_signals = {}
     extra_insights = {}
 
@@ -1355,23 +903,16 @@ def dashboard():
                 table_html, columns = _render_preview_table(df)
                 summary = _summarise_dataframe(analysis_df)
                 suggestions = generate_chart_suggestions(analysis_df)
-                dataset_type, trading_charts, data_health_charts, chart_notes = _prepare_visual_context(analysis_df)
                 quality_signals = _data_quality_signals(analysis_df)
                 extra_insights = _generate_additional_insights(analysis_df)
                 dataset_synopsis = _dataset_brief(analysis_df)
-                (
-                    generated_chart_html,
-                    generated_figure_json,
-                    generated_x_column,
-                    generated_y_column,
-                ) = build_generated_chart(analysis_df)
             except Exception as e:
                 flash(f"Error loading file '{filename}': {e}")
         else:
             flash('Selected file not found on disk')
 
     suggestions = suggestions or []
-    display_chart_html = chart_html or generated_chart_html
+    display_chart_html = chart_html  # leave blank until user explicitly visualizes
     display_figure_json = generated_figure_json
     display_x_column = generated_x_column
     display_y_column = generated_y_column
@@ -1386,13 +927,8 @@ def dashboard():
         summary=summary,
         dataset_synopsis=dataset_synopsis,
         suggestions=suggestions,
-        dataset_type=dataset_type,
-        trading_charts=trading_charts,
-        data_health_charts=data_health_charts,
-        chart_notes=chart_notes,
         quality_signals=quality_signals,
         extra_insights=extra_insights,
-        saved_charts=saved_chart_views,
         dataset_summary=dataset_summary,
         overview_insights=overview_insights,
         overview_charts_html=overview_charts_html,
@@ -1416,10 +952,9 @@ def upload():
     _enforce_rate_limit(f"upload:{_client_ip()}")
 
     file = request.files.get('data_file')
-    google_sheet_url = request.form.get('gsheet_url', '').strip()
 
-    if (not file or file.filename == '') and not google_sheet_url:
-        flash('Please upload a file or provide a Google Sheets link.')
+    if not file or file.filename == '':
+        flash('Please upload a CSV file.')
         return redirect(url_for('dashboard'))
 
     user_dir = _user_upload_dir(session['user_id'])
@@ -1432,40 +967,26 @@ def upload():
     overview_insights: list[str] = []
     overview_charts_html: list[str] = []
     chart_html: str | None = None
+    try:
+        _validate_upload_file(file)
+    except Exception as exc:
+        flash(str(exc))
+        return redirect(url_for('dashboard'))
 
-    if google_sheet_url:
-        try:
-            df = _load_google_sheet(google_sheet_url)
-        except Exception as exc:
-            flash(f'Google Sheets import failed: {exc}')
-            return redirect(url_for('dashboard'))
+    safe_name = secure_filename(file.filename)
+    if not safe_name:
+        flash('Invalid filename')
+        return redirect(url_for('dashboard'))
 
-        safe_name = secure_filename(f"google-sheet-{datetime.utcnow().strftime('%Y%m%d')}.csv") or 'google-sheet.csv'
-        stored_name = f"{uuid.uuid4().hex}__{safe_name}"
-        filepath = user_dir / stored_name
-        df.to_csv(filepath, index=False)
+    stored_name = f"{uuid.uuid4().hex}__{safe_name}"
+    filepath = user_dir / stored_name
+    file.save(filepath)
+
+    try:
         df = _load_dataframe(filepath)
-    else:
-        try:
-            _validate_upload_file(file)
-        except Exception as exc:
-            flash(str(exc))
-            return redirect(url_for('dashboard'))
-
-        safe_name = secure_filename(file.filename)
-        if not safe_name:
-            flash('Invalid filename')
-            return redirect(url_for('dashboard'))
-
-        stored_name = f"{uuid.uuid4().hex}__{safe_name}"
-        filepath = user_dir / stored_name
-        file.save(filepath)
-
-        try:
-            df = _load_dataframe(filepath)
-        except Exception:
-            filepath.unlink(missing_ok=True)
-            raise
+    except Exception:
+        filepath.unlink(missing_ok=True)
+        raise
 
     new_upload = Upload(filename=stored_name, user_id=session['user_id'])
     db.session.add(new_upload)
@@ -1475,29 +996,13 @@ def upload():
         analysis_df = _analysis_subset(df)
         summary = _summarise_dataframe(analysis_df)
         suggestions = generate_chart_suggestions(analysis_df)
-        dataset_type, trading_charts, data_health_charts, chart_notes = _prepare_visual_context(analysis_df)
         table_html, columns = _render_preview_table(df)
-        (
-            generated_chart_html,
-            generated_figure_json,
-            generated_x_column,
-            generated_y_column,
-        ) = build_generated_chart(analysis_df)
-        display_chart_html = generated_chart_html
-        display_figure_json = generated_figure_json
-        display_x_column = generated_x_column
-        display_y_column = generated_y_column
+        # Do not auto-generate a chart on upload; keep the hero slot blank until the user visualizes.
+        display_chart_html = None
+        display_figure_json = None
+        display_x_column = None
+        display_y_column = None
         db.session.commit()
-        _save_profile(new_upload, analysis_df)
-        db.session.commit()
-        drift = _schema_drift_message(
-            session['user_id'],
-            safe_name,
-            {col: str(dtype) for col, dtype in analysis_df.dtypes.items()},
-            exclude_upload_id=new_upload.id
-        )
-        if drift:
-            flash(f"Schema drift detected: {drift}")
     except Exception as e:
         db.session.rollback()
         filepath.unlink(missing_ok=True)
@@ -1525,26 +1030,16 @@ def upload():
         dataset_synopsis=dataset_synopsis,
         selected_file=stored_name,
         suggestions=suggestions,
-        dataset_type=dataset_type,
-        trading_charts=trading_charts,
-        data_health_charts=data_health_charts,
-        chart_notes=chart_notes,
         quality_signals=_data_quality_signals(analysis_df),
         extra_insights=_generate_additional_insights(analysis_df),
-        saved_charts=_prepare_saved_chart_views(
-            SavedChart.query
-            .filter_by(user_id=session['user_id'], upload_id=new_upload.id)
-            .order_by(SavedChart.created_at.desc())
-            .all()
-        ),
         dataset_summary=dataset_summary,
         overview_insights=overview_insights,
         overview_charts_html=overview_charts_html,
-        chart=generated_chart_html,
-        generated_chart_html=generated_chart_html,
-        generated_figure_json=generated_figure_json,
-        generated_x_column=generated_x_column,
-        generated_y_column=generated_y_column,
+        chart=display_chart_html,
+        generated_chart_html=display_chart_html,
+        generated_figure_json=display_figure_json,
+        generated_x_column=display_x_column,
+        generated_y_column=display_y_column,
         display_chart_html=display_chart_html,
         display_figure_json=display_figure_json,
         display_x_column=display_x_column,
@@ -1566,8 +1061,6 @@ def visualize():
     filter_column = request.form.get('filter_column')
     filter_value = request.form.get('filter_value')
     sample_fraction = request.form.get('sample_fraction')
-    save_title = request.form.get('save_title')
-    shareable = request.form.get('shareable') == 'on'
     dataset_summary: dict = {}
     overview_insights: list[str] = []
     overview_charts_html: list[str] = []
@@ -1670,27 +1163,6 @@ def visualize():
         chart_html = fig.to_html(full_html=False)
         figure_json = json.dumps(fig, cls=PlotlyJSONEncoder)
 
-        if save_title:
-            token = uuid.uuid4().hex if shareable else None
-            if not upload:
-                raise ValueError('Upload not found for saving chart')
-            saved = SavedChart(
-                user_id=session['user_id'],
-                upload_id=upload.id,
-                title=save_title,
-                chart_type=chart_type,
-                x_column=x_column,
-                y_column=y_column or None,
-                filter_column=filter_column,
-                filter_value=filter_value,
-                sample_fraction=sample_fraction_value,
-                figure_json=figure_json,
-                chart_html=chart_html,
-                shared_token=token
-            )
-            db.session.add(saved)
-            db.session.commit()
-
         # Update suggestions, preview, summary
         dataset_summary, overview_insights, overview_charts_html = build_tableau_overview(df)
         analysis_df = _analysis_subset(df)
@@ -1701,7 +1173,6 @@ def visualize():
             generated_y_column,
         ) = build_generated_chart(analysis_df)
         suggestions = generate_chart_suggestions(analysis_df)
-        dataset_type, trading_charts, data_health_charts, chart_notes = _prepare_visual_context(analysis_df)
         table_html, columns = _render_preview_table(df)
         summary = _summarise_dataframe(analysis_df)
         dataset_synopsis = _dataset_brief(analysis_df)
@@ -1727,21 +1198,11 @@ def visualize():
             summary=summary,
             dataset_synopsis=dataset_synopsis,
             suggestions=suggestions,
-            dataset_type=dataset_type,
-            trading_charts=trading_charts,
-            data_health_charts=data_health_charts,
-            chart_notes=chart_notes,
             quality_signals=_data_quality_signals(analysis_df),
             extra_insights=_generate_additional_insights(analysis_df),
             dataset_summary=dataset_summary,
             overview_insights=overview_insights,
             overview_charts_html=overview_charts_html,
-            saved_charts=_prepare_saved_chart_views(
-                SavedChart.query
-                .filter_by(user_id=session['user_id'], upload_id=upload.id if upload else None)
-                .order_by(SavedChart.created_at.desc())
-                .all()
-            ) if upload else [],
             generated_chart_html=generated_chart_html,
             generated_figure_json=generated_figure_json,
             generated_x_column=generated_x_column,
@@ -1757,59 +1218,6 @@ def visualize():
         flash(f"Error generating chart: {e}")
         return redirect(url_for('dashboard'))
 
-
-@app.route('/save_generated_chart', methods=['POST'])
-def save_generated_chart():
-    if 'user' not in session:
-        return redirect(url_for('login'))
-
-    upload_id = request.form.get('upload_id', type=int)
-    title = request.form.get('title', '').strip()
-    generate_shareable = request.form.get('generate_shareable') in {'1', 'on', 'true', 'yes'}
-
-    if not upload_id:
-        flash('No upload selected for saving chart.')
-        return redirect(url_for('dashboard'))
-
-    upload = Upload.query.filter_by(id=upload_id, user_id=session['user_id']).first()
-    if not upload:
-        flash('Upload not found for saving chart.')
-        return redirect(url_for('dashboard'))
-
-    if not title:
-        base_name = upload.original_filename if upload else 'Generated chart'
-        title = f"{base_name} (auto chart)"
-
-    figure_json = request.form.get('figure_json')
-    chart_html = request.form.get('chart_html')
-    x_column = request.form.get('x_column') or None
-    y_column = request.form.get('y_column') or None
-
-    if not chart_html:
-        flash('No generated chart available to save.')
-        return redirect(url_for('dashboard', filename=upload.filename))
-
-    token = uuid.uuid4().hex if generate_shareable else None
-
-    saved = SavedChart(
-        user_id=session['user_id'],
-        upload_id=upload.id,
-        title=title,
-        chart_type='auto',
-        x_column=x_column,
-        y_column=y_column,
-        filter_column=None,
-        filter_value=None,
-        sample_fraction=None,
-        figure_json=figure_json,
-        chart_html=chart_html,
-        shared_token=token,
-    )
-    db.session.add(saved)
-    db.session.commit()
-
-    flash('Generated chart saved.', 'success')
-    return redirect(url_for('dashboard', filename=upload.filename))
 
 @app.route('/delete_file', methods=['POST'])
 def delete_file():
@@ -1827,8 +1235,6 @@ def delete_file():
     upload = Upload.query.filter_by(user_id=session['user_id'], filename=filename).first()
     display_name = upload.original_filename if upload else filename
     if upload:
-        DatasetProfile.query.filter_by(upload_id=upload.id).delete()
-        SavedChart.query.filter_by(upload_id=upload.id).delete()
         db.session.delete(upload)
         db.session.commit()
 
@@ -1861,35 +1267,11 @@ def delete_all_files():
         filepath = user_dir / upload.filename
         if filepath.exists():
             filepath.unlink()
-        DatasetProfile.query.filter_by(upload_id=upload.id).delete()
-        SavedChart.query.filter_by(upload_id=upload.id).delete()
         db.session.delete(upload)
 
     db.session.commit()
     flash('All uploaded files have been deleted.')
     return redirect(url_for('dashboard'))
-
-
-@app.route('/save_chart/<int:chart_id>/delete', methods=['POST'])
-def delete_saved_chart(chart_id: int):
-    if 'user' not in session:
-        return redirect(url_for('login'))
-
-    chart = SavedChart.query.filter_by(id=chart_id, user_id=session['user_id']).first_or_404()
-    upload = Upload.query.get(chart.upload_id)
-    db.session.delete(chart)
-    db.session.commit()
-    flash('Saved chart deleted')
-    if upload:
-        return redirect(url_for('dashboard', filename=upload.filename))
-    return redirect(url_for('dashboard'))
-
-
-@app.route('/charts/<token>')
-def shared_chart(token: str):
-    chart = SavedChart.query.filter_by(shared_token=token).first_or_404()
-    chart_html = _render_saved_chart_html(chart)
-    return render_template('shared_chart.html', chart_html=chart_html, title=chart.title)
 
 
 

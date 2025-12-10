@@ -56,23 +56,18 @@
 
     <!-- Upload Form -->
     <div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
-      <h2 class="mb-0">Upload data or import Sheets</h2>
-      <span class="badge text-bg-light">CSV • Excel • Google Sheets</span>
+      <h2 class="mb-0">Upload data</h2>
+      <span class="badge text-bg-light">CSV only</span>
     </div>
-    <p class="text-muted mt-1">Bring in your files or paste a Google Sheets link—everything is profiled for insights and quality.</p>
+    <p class="text-muted mt-1">Upload a CSV to explore and visualize.</p>
     <form method="POST" action="{{ url_for('upload') }}" enctype="multipart/form-data" class="mb-4">
       <div class="row g-3 align-items-end">
         <div class="col-lg-4 col-md-6">
-          <label class="form-label fw-semibold">Upload CSV or Excel</label>
-          <input type="file" name="data_file" class="form-control" accept=".csv,.xlsx,.xls">
+          <label class="form-label fw-semibold">Upload CSV</label>
+          <input type="file" name="data_file" class="form-control" accept=".csv">
           <div class="form-text">Max 25MB; large files are sampled to keep performance predictable.</div>
         </div>
-        <div class="col-lg-5 col-md-6">
-          <label class="form-label fw-semibold">Or paste a Google Sheets link</label>
-          <input type="url" name="gsheet_url" class="form-control" placeholder="https://docs.google.com/spreadsheets/d/...">
-          <div class="form-text">We’ll fetch a CSV export from the shared sheet.</div>
-        </div>
-        <div class="col-lg-3 col-md-12 d-grid">
+        <div class="col-lg-3 col-md-12 d-grid ms-auto">
           <button type="submit" class="btn btn-primary btn-lg">Add dataset</button>
         </div>
       </div>
@@ -95,51 +90,6 @@
         <div class="card-body">
           {{ display_chart_html|safe }}
 
-          {% if current_upload %}
-            <form method="POST" action="{{ url_for('save_generated_chart', filename=selected_file) }}" class="mt-3">
-              <input type="hidden" name="upload_id" value="{{ current_upload.id }}">
-              {% if display_figure_json %}
-                <input type="hidden" name="figure_json" value='{{ display_figure_json|e }}'>
-              {% endif %}
-              {% if display_chart_html %}
-                <input type="hidden" name="chart_html" value='{{ display_chart_html|e }}'>
-              {% endif %}
-              {% if display_x_column %}
-                <input type="hidden" name="x_column" value="{{ display_x_column }}">
-              {% endif %}
-              {% if display_y_column %}
-                <input type="hidden" name="y_column" value="{{ display_y_column }}">
-              {% endif %}
-
-              <div class="row g-2 align-items-center">
-                <div class="col-md-5">
-                  <input
-                    type="text"
-                    class="form-control"
-                    name="title"
-                    placeholder="Give this chart a name (optional)"
-                  >
-                </div>
-                <div class="col-md-3 form-check">
-                  <input
-                    class="form-check-input"
-                    type="checkbox"
-                    id="generated-share"
-                    name="generate_shareable"
-                    value="1"
-                  >
-                  <label class="form-check-label" for="generated-share">
-                    Create shareable link
-                  </label>
-                </div>
-                <div class="col-md-4 text-end">
-                  <button type="submit" class="btn btn-primary">
-                    Save chart
-                  </button>
-                </div>
-              </div>
-            </form>
-          {% endif %}
         </div>
       </div>
     {% endif %}
@@ -345,19 +295,6 @@
                     <input type="number" step="0.05" min="0.05" max="0.95" name="sample_fraction" class="form-control" placeholder="0.25">
                   </div>
                 </div>
-                <div class="row mb-3">
-                  <div class="col-md-8">
-                    <label class="form-label">Save chart title (optional)</label>
-                    <input type="text" name="save_title" class="form-control" placeholder="Give this chart a name">
-                    <div class="form-text">Saved charts appear below and can be shared via link.</div>
-                  </div>
-                  <div class="col-md-4 d-flex align-items-end">
-                    <div class="form-check">
-                      <input class="form-check-input" type="checkbox" name="shareable" id="shareableCheck">
-                      <label class="form-check-label" for="shareableCheck">Generate shareable link</label>
-                    </div>
-                  </div>
-                </div>
                 <button type="submit" class="btn btn-success">Generate Chart</button>
               </form>
             </div>
@@ -365,61 +302,6 @@
       </div>
     </div>
   {% endif %}
-
-    <div class="accordion mt-4" id="savedChartsAccordion">
-      <div class="accordion-item">
-        <h2 class="accordion-header" id="savedChartsHeading">
-          <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#collapseSavedCharts">
-            Saved charts
-          </button>
-        </h2>
-        <div id="collapseSavedCharts" class="accordion-collapse collapse">
-          <div class="accordion-body">
-            {% if saved_charts %}
-              {% for chart in saved_charts %}
-                <div class="border rounded p-3 mb-3">
-                  <div class="d-flex justify-content-between align-items-start">
-                    <div>
-                      <div class="fw-semibold">{{ chart.title }}</div>
-                      <div class="mb-1">
-                        <span class="badge bg-secondary">{{ chart.chart_type or 'custom' }}</span>
-                      </div>
-                      <div class="text-muted small">Saved {{ chart.created_at.strftime('%b %d, %Y %H:%M') }}</div>
-                      <div class="text-muted small">
-                        {% if chart.chart_type %}
-                          {{ chart.chart_type|capitalize }} chart
-                        {% endif %}
-                        {% if chart.x_column %}
-                          • X: {{ chart.x_column }}
-                        {% endif %}
-                        {% if chart.y_column %}
-                          • Y: {{ chart.y_column }}
-                        {% endif %}
-                        {% if chart.filter_column and chart.filter_value %}
-                          • Filter: {{ chart.filter_column }} contains "{{ chart.filter_value }}"
-                        {% endif %}
-                        {% if chart.sample_fraction %}
-                          • Sample: {{ '%.2f'|format(chart.sample_fraction) }}
-                        {% endif %}
-                      </div>
-                      {% if chart.shared_token %}
-                        <div class="small"><a href="{{ url_for('shared_chart', token=chart.shared_token, _external=True) }}" target="_blank">Share link</a></div>
-                      {% endif %}
-                    </div>
-                    <form method="POST" action="{{ url_for('delete_saved_chart', chart_id=chart.id) }}" class="ms-3 mb-0">
-                      <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
-                    </form>
-                  </div>
-                  <div class="mt-3">{{ chart.html|safe }}</div>
-                </div>
-              {% endfor %}
-            {% else %}
-              <p class="text-muted mb-0">No saved charts for this dataset yet.</p>
-            {% endif %}
-          </div>
-        </div>
-      </div>
-    </div>
 
     <!-- Uploaded Files -->
     <div class="accordion mt-5" id="filesAccordion">
@@ -464,36 +346,6 @@
         </div>
       </div>
     </div>
-
-      {% if dataset_type == 'trading_paper_trades' %}
-        <div class="accordion mt-4" id="tradingAccordion">
-          <div class="accordion-item">
-            <h2 class="accordion-header" id="tradingHeading">
-              <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#collapseTrading">
-                Trading insights
-              </button>
-            </h2>
-            <div id="collapseTrading" class="accordion-collapse collapse">
-              <div class="accordion-body">
-                <p class="text-muted small">Automatic views tailored for the Stock_Analysis_App CSVs to explain positions, strategies, and trade timing.</p>
-                {% if trading_charts %}
-                  {% for viz in trading_charts %}
-                    <div class="mb-4">
-                      <div class="d-flex align-items-center justify-content-between">
-                        <h6 class="mb-1">{{ viz.title }}</h6>
-                      </div>
-                      <p class="text-muted small mb-2">{{ viz.description }}</p>
-                      <div class="border rounded p-2">{{ viz.html|safe }}</div>
-                    </div>
-                  {% endfor %}
-                {% else %}
-                  <p class="text-muted small mb-0">No trading-specific visuals could be generated for this file.</p>
-                {% endif %}
-              </div>
-            </div>
-          </div>
-        </div>
-      {% endif %}
 
     </div>
   </div>
