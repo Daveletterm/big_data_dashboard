@@ -387,20 +387,6 @@ def build_tableau_overview(df: pd.DataFrame) -> tuple[dict, list[str], list[str]
             top_metric = max(ranges, key=ranges.get)
             overview_insights.append(f"Most volatile metric is {top_metric} (range {ranges[top_metric]:.2f}).")
 
-    if len(metric_cols) >= 2:
-        corr_df = pd.DataFrame({col: numeric_series_map[col] for col in metric_cols})
-        corr = corr_df.corr()
-        if not corr.empty:
-            corr_values = corr.abs()
-            mask = corr_values.where(~np.eye(corr_values.shape[0], dtype=bool))
-            strongest = mask.stack().sort_values(ascending=False)
-            if not strongest.empty and not pd.isna(strongest.iloc[0]):
-                m1, m2 = strongest.index[0]
-                val = float(strongest.iloc[0])
-                overview_insights.append(
-                    f"Strongest correlation: {m1} vs {m2} (r = {val:.2f})."
-                )
-
     overview_charts_html: list[str] = []
 
     def _style_and_render(fig) -> None:
@@ -458,25 +444,6 @@ def build_tableau_overview(df: pd.DataFrame) -> tuple[dict, list[str], list[str]
                                 title="Average metrics by category",
                             )
                             _style_and_render(fig_cat)
-    elif len(metric_cols) >= 2:
-        corr_df = pd.DataFrame({col: numeric_series_map[col] for col in metric_cols})
-        corr = corr_df.corr().fillna(0)
-        fig_corr = px.imshow(
-            corr,
-            text_auto='.2f',
-            color_continuous_scale='Blues',
-            title='Correlation matrix of metrics',
-            labels={'color': 'Correlation'}
-        )
-        _style_and_render(fig_corr)
-
-        metric_var = {col: numeric_series_map[col].var(skipna=True) for col in metric_cols}
-        primary_metric = max(metric_var, key=lambda c: (metric_var[c] if not pd.isna(metric_var[c]) else -np.inf), default=None)
-        if primary_metric and not pd.isna(metric_var.get(primary_metric, np.nan)):
-            series = numeric_series_map[primary_metric].dropna()
-            if not series.empty:
-                fig_hist = px.histogram(series, x=series, nbins=30, title=f"Distribution of {primary_metric}")
-                _style_and_render(fig_hist)
     elif metric_cols and category_cols:
         metric = metric_cols[0]
         cat = category_cols[0]
@@ -658,16 +625,6 @@ def _generate_additional_insights(df: pd.DataFrame) -> dict[str, str]:
             f"{total_nulls:,} missing values (~{percent_missing:.1f}% of the dataset); "
             f"top gaps in {top_missing_str}"
         )
-
-    numeric_cols = df.select_dtypes(include=['number'])
-    if numeric_cols.shape[1] >= 2:
-        corr = numeric_cols.corr().abs()
-        mask = corr.where(~np.tril(np.ones(corr.shape)).astype(bool))
-        stacked = mask.stack()
-        strong = stacked[stacked >= 0.65].sort_values(ascending=False).head(3)
-        if not strong.empty:
-            pairs = ', '.join(f"{a} vs {b} (ρ={val:.2f})" for (a, b), val in strong.items())
-            insights['strong relationships'] = f"Notable correlations: {pairs}"
 
     categorical_cols = df.select_dtypes(include=['object', 'category'])
     if not categorical_cols.empty:
@@ -923,14 +880,14 @@ def _build_trading_visuals(df: pd.DataFrame) -> tuple[list[dict[str, str]], list
     else:
         chart_notes.append('Skipped trading visuals: no trade rows detected.')
 
-    data_health_charts, health_notes = _build_data_health_charts(df, 'trading_paper_trades')
-    chart_notes.extend(health_notes)
+    # Data health visuals removed.
+    data_health_charts: list[dict[str, str]] = []
     return trading_charts, data_health_charts, chart_notes
 
 
 def _build_generic_visuals(df: pd.DataFrame) -> tuple[list[dict[str, str]], list[str]]:
-    charts, notes = _build_data_health_charts(df, 'generic')
-    return charts, notes
+    # Data health visuals removed.
+    return [], []
 
 
 def _prepare_visual_context(df: pd.DataFrame) -> tuple[str, list[dict[str, str]], list[dict[str, str]], list[str]]:
@@ -944,53 +901,8 @@ def _prepare_visual_context(df: pd.DataFrame) -> tuple[str, list[dict[str, str]]
 
 
 def _build_data_health_charts(df: pd.DataFrame, dataset_type: str) -> tuple[list[dict[str, str]], list[str]]:
-    charts: list[dict[str, str]] = []
-    notes: list[str] = []
-    numeric_cols = df.select_dtypes(include=['number'])
-
-    corr_condition = (
-        numeric_cols.shape[1] >= 3 and len(df) > 10
-        if dataset_type == 'trading_paper_trades'
-        else numeric_cols.shape[1] >= 2
-    )
-    if corr_condition:
-        corr = numeric_cols.corr().fillna(0)
-        fig_corr = px.imshow(
-            corr,
-            text_auto='.2f',
-            color_continuous_scale='Blues',
-            title='Correlation matrix of numeric columns',
-            labels={'color': 'Correlation'}
-        )
-        charts.append(
-            _chart_payload(
-                'Correlation matrix of numeric columns',
-                'Shows how numeric fields move together; strong values hint at drivers of performance or redundant fields.',
-                fig_corr,
-            )
-        )
-    else:
-        notes.append('Skipped correlation matrix: insufficient numeric columns or rows to compute reliable correlations.')
-
-    null_matrix = df.isnull()
-    if null_matrix.values.any():
-        fig_null = px.imshow(
-            null_matrix.astype(int),
-            color_continuous_scale=[[0, 'rgb(0,123,255)'], [1, 'rgb(220,53,69)']],
-            title='Null heatmap by column',
-            labels={'color': 'Null (1=yes)'}
-        )
-        charts.append(
-            _chart_payload(
-                'Null heatmap by column',
-                'Highlights where values are missing so you can judge data reliability before charting.',
-                fig_null,
-            )
-        )
-    else:
-        notes.append('Skipped null heatmap: no missing values detected.')
-
-    return charts, notes
+    # Data health visuals (correlation and null heatmaps) are disabled in the stripped-down app.
+    return [], []
 
 
 def _render_preview_table(df: pd.DataFrame) -> tuple[str, list[str]]:
@@ -1102,19 +1014,6 @@ def build_generated_chart(df: pd.DataFrame) -> tuple[str, str | None, str | None
         if not series.empty:
             fig = px.histogram(series, x=series, nbins=30, title=f"Distribution of {metric}")
             return _safe_payload(fig, x_col=metric)
-
-    if len(numeric_cols) >= 2:
-        corr_df = pd.DataFrame({col: numeric_map[col] for col in numeric_cols})
-        corr = corr_df.corr().fillna(0)
-        if not corr.empty:
-            fig = px.imshow(
-                corr,
-                text_auto='.2f',
-                color_continuous_scale='Blues',
-                title='Correlation heatmap',
-                labels={'color': 'Correlation'},
-            )
-            return _safe_payload(fig)
 
     if categorical_cols:
         cat = categorical_cols[0]
@@ -1680,7 +1579,7 @@ def visualize():
     if not filename or not x_column or not chart_type:
         flash("Missing form data")
         return redirect(url_for('dashboard'))
-    needs_y = chart_type not in {'pie', 'histogram', 'heatmap'} and not (chart_type == 'bar' and not y_column)
+    needs_y = chart_type not in {'pie', 'histogram'} and not (chart_type == 'bar' and not y_column)
     if needs_y and not y_column:
         flash('Y axis is required for this chart type')
         return redirect(url_for('dashboard'))
@@ -1731,18 +1630,6 @@ def visualize():
             if series.empty:
                 raise ValueError('No numeric data available for histogram.')
             fig = px.histogram(series, x=series, nbins=30, title=f"Distribution of {x_column}")
-        elif chart_type == 'heatmap':
-            numeric_df = df.select_dtypes(include=['number']).apply(pd.to_numeric, errors='coerce')
-            corr = numeric_df.corr().fillna(0)
-            if corr.empty:
-                raise ValueError('No numeric columns available for heatmap.')
-            fig = px.imshow(
-                corr,
-                text_auto='.2f',
-                color_continuous_scale='Blues',
-                title='Correlation heatmap',
-                labels={'color': 'Correlation'},
-            )
         elif chart_type == 'scatter_map':
             if not MAPBOX_TOKEN:
                 flash('Mapbox token missing; map charts may not render correctly.')

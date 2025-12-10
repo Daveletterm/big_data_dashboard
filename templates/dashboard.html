@@ -495,42 +495,6 @@
         </div>
       {% endif %}
 
-      <div class="accordion mt-4" id="healthAccordion">
-        <div class="accordion-item">
-          <h2 class="accordion-header" id="healthHeading">
-            <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#collapseHealth">
-              Data health
-            </button>
-          </h2>
-          <div id="collapseHealth" class="accordion-collapse collapse">
-            <div class="accordion-body">
-              <p class="text-muted small">These charts highlight missing data and relationships between numeric columns to help spot data issues.</p>
-              {% if data_health_charts %}
-                {% for viz in data_health_charts %}
-                  <div class="mb-4">
-                    <h6 class="mb-1">{{ viz.title }}</h6>
-                    <p class="text-muted small mb-2">{{ viz.description }}</p>
-                    <div class="border rounded p-2">{{ viz.html|safe }}</div>
-                  </div>
-                {% endfor %}
-              {% else %}
-                <p class="text-muted small">No data health visuals were generated for this dataset.</p>
-              {% endif %}
-              {% if chart_notes %}
-                <div class="alert alert-secondary">
-                  <div class="fw-semibold">Generation notes</div>
-                  <ul class="mb-0">
-                    {% for note in chart_notes %}
-                      <li>{{ note }}</li>
-                    {% endfor %}
-                  </ul>
-                </div>
-              {% endif %}
-            </div>
-          </div>
-        </div>
-      </div>
-
     </div>
   </div>
 
