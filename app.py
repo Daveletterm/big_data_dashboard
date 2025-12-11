@@ -302,45 +302,112 @@ def _load_dataframe(data_path: Path, max_rows: int = 150_000) -> pd.DataFrame:
     return df
 
 
-def _summarise_dataframe(df: pd.DataFrame) -> dict[str, str]:
-    """Generate human-readable insights for each column."""
+def _generate_smart_insights(df: pd.DataFrame) -> list[str]:
+    """Create plain-language highlights for non-technical users."""
 
-    summary: dict[str, str] = {}
+    insights: list[str] = []
+    if df.empty:
+        return insights
 
-    for column in df.columns:
-        col_data = df[column]
+    roles = infer_column_roles(df)
+    cat_cols = roles["category"] + roles["numeric_category"]
+    numeric_df = df.select_dtypes(include=['number']).apply(pd.to_numeric, errors='coerce')
+    total_rows = len(df)
 
-        if pd.api.types.is_numeric_dtype(col_data):
-            non_missing = col_data.dropna()
-            if non_missing.empty:
-                summary[column] = "No numeric data available"
-            else:
-                summary[column] = (
-                    f"Mean: {non_missing.mean():.2f}, "
-                    f"Median: {non_missing.median():.2f}, "
-                    f"Min: {non_missing.min()}, "
-                    f"Max: {non_missing.max()}"
+    def _fmt_pct(value: float) -> str:
+        return f"{value * 100:.0f}%"
+
+    # Category imbalance: call out when one group dominates.
+    for col in cat_cols:
+        vc = df[col].dropna().value_counts()
+        if vc.empty:
+            continue
+        top_value = vc.index[0]
+        top_share = vc.iloc[0] / total_rows
+        if top_share >= 0.5:
+            second_share = vc.iloc[1] / total_rows if len(vc) > 1 else 0
+            second_value = vc.index[1] if len(vc) > 1 else None
+            if second_value is not None:
+                insights.append(
+                    f"Most rows are {col} = {top_value} ({_fmt_pct(top_share)}); next is {second_value} ({_fmt_pct(second_share)})."
                 )
-        elif col_data.dtype == 'object' or col_data.dtype.name == 'category':
-            non_missing = col_data.dropna()
-            if non_missing.empty:
-                summary[column] = "No values available"
             else:
-                value_counts = non_missing.value_counts()
-                top_value = value_counts.idxmax()
-                top_count = value_counts.max()
-                summary[column] = f"Most common: {top_value} ({top_count} times)"
-        else:
-            summary[column] = "No insight available"
+                insights.append(f"Almost all rows are {col} = {top_value} ({_fmt_pct(top_share)}).")
+            break
 
-    missing_data = df.isnull().sum()
-    for column, count in missing_data.items():
-        if count > 0:
-            existing = summary.get(column, "")
-            missing_message = f"Missing: {count}"
-            summary[column] = f"{existing} | {missing_message}".strip(" |")
+    # Missing data: spotlight the worst offender.
+    missing_frac = df.isna().mean().sort_values(ascending=False)
+    for col, frac in missing_frac.items():
+        if frac >= 0.2:
+            insights.append(f"{col} is missing in about {_fmt_pct(frac)} of rows, so results for it may be incomplete.")
+            break
 
-    return summary
+    # Relationship between two numeric columns (simple correlation translated to plain language).
+    if numeric_df.shape[1] >= 2:
+        corr_matrix = numeric_df.corr()
+        best_pair: tuple[str, str] | None = None
+        best_value = 0.0
+        cols = list(corr_matrix.columns)
+        for i, col_a in enumerate(cols):
+            for j in range(i + 1, len(cols)):
+                col_b = cols[j]
+                corr_val = corr_matrix.loc[col_a, col_b]
+                if pd.notna(corr_val) and abs(corr_val) > abs(best_value):
+                    best_value = corr_val
+                    best_pair = (col_a, col_b)
+        if best_pair and abs(best_value) >= 0.65:
+            direction = "move in the same direction" if best_value > 0 else "move in opposite directions"
+            insights.append(f"When {best_pair[0]} goes up, {best_pair[1]} tends to {direction} — a strong link worth a look.")
+
+    # Recent trend on a time column with a numeric metric.
+    time_col = None
+    if roles["time"]:
+        time_col = roles["time"][0]
+    elif roles["year"]:
+        time_col = roles["year"][0]
+    if time_col and numeric_df.shape[1] >= 1:
+        time_series = pd.to_datetime(df[time_col], errors='coerce')
+        time_df = df.copy()
+        time_df[time_col] = time_series
+        time_df = time_df.dropna(subset=[time_col]).sort_values(time_col)
+        if len(time_df) >= 10:
+            metric_col = numeric_df.columns[0]
+            values = pd.to_numeric(time_df[metric_col], errors='coerce')
+            time_df = time_df[values.notna()]
+            window = max(5, int(len(time_df) * 0.2))
+            if window < len(time_df):
+                recent_mean = values.iloc[-window:].mean()
+                prior_mean = values.iloc[-(2 * window):-window].mean()
+                if pd.notna(recent_mean) and pd.notna(prior_mean) and prior_mean:
+                    change = (recent_mean - prior_mean) / prior_mean
+                    if abs(change) >= 0.1:
+                        direction = "higher" if change > 0 else "lower"
+                        insights.append(
+                            f"Recent values for {metric_col} are about {_fmt_pct(abs(change))} {direction} than earlier in the data."
+                        )
+
+    # Outliers: simple IQR check on a numeric column.
+    if numeric_df.shape[1] >= 1:
+        for col in numeric_df.columns:
+            series = numeric_df[col].dropna()
+            if len(series) < 20:
+                continue
+            q1, q3 = series.quantile([0.25, 0.75])
+            iqr = q3 - q1
+            if iqr == 0:
+                continue
+            lower = q1 - 1.5 * iqr
+            upper = q3 + 1.5 * iqr
+            outliers = series[(series < lower) | (series > upper)]
+            frac = len(outliers) / len(series)
+            if frac >= 0.05:
+                insights.append(f"{col} has a handful of unusually high or low values (~{_fmt_pct(frac)} of rows); averages may be pulled around.")
+                break
+
+    if not insights:
+        insights.append("No strong standouts detected yet — try filtering or choosing a chart to explore further.")
+
+    return insights[:5]
 
 
 def _data_quality_signals(df: pd.DataFrame) -> dict[str, str]:
@@ -700,7 +767,7 @@ def dashboard():
     )
     table_html = None
     columns: list[str] = []
-    summary = None
+    smart_insights: list[str] = []
     dataset_synopsis = None
     suggestions = None
     chart_html: str | None = None
@@ -729,7 +796,7 @@ def dashboard():
                 df = _load_dataframe(filepath)
                 analysis_df = _analysis_subset(df)
                 table_html, columns = _render_preview_table(df)
-                summary = _summarise_dataframe(analysis_df)
+                smart_insights = _generate_smart_insights(analysis_df)
                 suggestions = generate_chart_suggestions(analysis_df)
                 quality_signals = _data_quality_signals(analysis_df)
                 extra_insights = _generate_additional_insights(analysis_df)
@@ -752,7 +819,7 @@ def dashboard():
         columns=columns,
         uploads=uploads,
         selected_file=filename,
-        summary=summary,
+        smart_insights=smart_insights,
         dataset_synopsis=dataset_synopsis,
         suggestions=suggestions,
         quality_signals=quality_signals,
@@ -789,6 +856,7 @@ def upload():
     stored_name: str
     filepath: Path
     chart_html: str | None = None
+    smart_insights: list[str] = []
     try:
         _validate_upload_file(file)
     except Exception as exc:
@@ -815,7 +883,7 @@ def upload():
 
     try:
         analysis_df = _analysis_subset(df)
-        summary = _summarise_dataframe(analysis_df)
+        smart_insights = _generate_smart_insights(analysis_df)
         suggestions = generate_chart_suggestions(analysis_df)
         table_html, columns = _render_preview_table(df)
         # Do not auto-generate a chart on upload; keep the hero slot blank until the user visualizes.
@@ -847,7 +915,7 @@ def upload():
         table=table_html,
         columns=columns,
         uploads=uploads,
-        summary=summary,
+        smart_insights=smart_insights,
         dataset_synopsis=dataset_synopsis,
         selected_file=stored_name,
         suggestions=suggestions,
@@ -876,6 +944,7 @@ def visualize():
     x_column = request.form.get('x_column')
     y_column = request.form.get('y_column', '')
     chart_type = request.form.get('chart_type')
+    smart_insights: list[str] = []
     generated_chart_html: str | None = None
     generated_figure_json: str | None = None
     generated_x_column: str | None = None
@@ -971,7 +1040,7 @@ def visualize():
         ) = build_generated_chart(analysis_df)
         suggestions = generate_chart_suggestions(analysis_df)
         table_html, columns = _render_preview_table(df)
-        summary = _summarise_dataframe(analysis_df)
+        smart_insights = _generate_smart_insights(analysis_df)
         dataset_synopsis = _dataset_brief(analysis_df)
 
         display_chart_html = chart_html or generated_chart_html
@@ -992,7 +1061,7 @@ def visualize():
             ),
             selected_file=filename,
             chart=chart_html,
-            summary=summary,
+            smart_insights=smart_insights,
             dataset_synopsis=dataset_synopsis,
             suggestions=suggestions,
             quality_signals=_data_quality_signals(analysis_df),

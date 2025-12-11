@@ -113,7 +113,7 @@
     {% endif %}
 
     <!-- Smart Insights -->
-    {% if summary %}
+    {% if smart_insights %}
       <div class="accordion mt-5" id="insightAccordion">
         <div class="accordion-item">
           <h2 class="accordion-header" id="insightHeading">
@@ -123,13 +123,13 @@
           </h2>
           <div id="collapseInsights" class="accordion-collapse collapse show">
             <div class="accordion-body">
-              <p class="text-muted">Brief summary of what this dataset appears to be and the kinds of insights it can surface.</p>
+              <p class="text-muted">Short takeaways in everyday language to help you know where to explore next.</p>
               {% if dataset_synopsis %}
                 <div class="alert alert-secondary py-2">{{ dataset_synopsis }}</div>
               {% endif %}
               <ul class="list-group">
-                {% for col, insight in summary.items() %}
-                  <li class="list-group-item"><strong>{{ col }}</strong>: {{ insight }}</li>
+                {% for insight in smart_insights %}
+                  <li class="list-group-item">{{ insight }}</li>
                 {% endfor %}
               </ul>
               {% if extra_insights %}
