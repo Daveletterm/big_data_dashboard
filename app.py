@@ -901,6 +901,7 @@ def upload():
 
     new_upload = Upload(filename=stored_name, user_id=session['user_id'])
     db.session.add(new_upload)
+    db.session.commit()  # persist the upload record immediately so it survives later errors
 
     try:
         analysis_df = _analysis_subset(df)
@@ -912,10 +913,7 @@ def upload():
         display_figure_json = None
         display_x_column = None
         display_y_column = None
-        db.session.commit()
     except Exception as e:
-        db.session.rollback()
-        filepath.unlink(missing_ok=True)
         flash(f'Error processing file: {e}')
         return redirect(url_for('dashboard'))
 
