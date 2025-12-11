@@ -8,7 +8,6 @@ from dotenv import load_dotenv
 from pathlib import Path
 import mimetypes
 import os
-import re
 import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -17,7 +16,6 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.io as pio
-from plotly.io import to_html
 from plotly.utils import PlotlyJSONEncoder
 import json
 
@@ -283,172 +281,6 @@ def _select_primary_numeric(numeric_series_map: dict[str, pd.Series]) -> str | N
         return None
     variances = {col: series.var(skipna=True) for col, series in numeric_series_map.items()}
     return max(variances, key=lambda c: (variances[c] if not pd.isna(variances[c]) else -np.inf), default=None)
-
-
-def build_tableau_overview(df: pd.DataFrame) -> tuple[dict, list[str], list[str]]:
-    """Construct a smarter overview profile, headline insights, and charts."""
-
-    roles = infer_column_roles(df)
-    numeric_series_map: dict[str, pd.Series] = {}
-    for col in df.columns:
-        series = pd.to_numeric(df[col], errors='coerce')
-        if series.notna().sum() > 0:
-            numeric_series_map[col] = series
-    metric_cols = [c for c in roles["metric"] if c in numeric_series_map]
-    category_cols = roles["category"] + roles["numeric_category"]
-    time_cols = roles["time"]
-    year_cols = roles["year"]
-
-    primary_time_col = None
-    if time_cols:
-        primary_time_col = time_cols[0]
-    elif year_cols:
-        primary_time_col = year_cols[0]
-
-    time_start = time_end = None
-    if primary_time_col:
-        if primary_time_col in year_cols:
-            time_series = pd.to_datetime(pd.to_numeric(df[primary_time_col], errors='coerce'), format='%Y', errors='coerce', utc=True)
-        else:
-            time_series = pd.to_datetime(df[primary_time_col], errors='coerce', utc=True)
-        time_series = time_series.dropna()
-        if not time_series.empty:
-            time_start = time_series.min()
-            time_end = time_series.max()
-
-    num_numeric = len(df.select_dtypes(include=['number']).columns)
-    num_datetime = len(time_cols) + len(year_cols)
-    num_categorical = len(category_cols)
-
-    inferred_type = "unknown"
-    if primary_time_col and metric_cols:
-        inferred_type = "time-series"
-    elif len(metric_cols) >= 2:
-        inferred_type = "numeric-matrix"
-    elif metric_cols and category_cols:
-        inferred_type = "categorical-metric"
-    elif category_cols:
-        inferred_type = "categorical"
-
-    dataset_summary = {
-        "row_count": len(df),
-        "col_count": len(df.columns),
-        "num_numeric": num_numeric,
-        "num_datetime": num_datetime,
-        "num_categorical": num_categorical,
-        "primary_time_col": primary_time_col,
-        "time_start": time_start,
-        "time_end": time_end,
-        "inferred_dataset_type": inferred_type,
-        "roles": roles,
-    }
-
-    overview_insights: list[str] = []
-    if category_cols:
-        cat = category_cols[0]
-        vc = df[cat].value_counts(dropna=True)
-        if not vc.empty:
-            top_cat = vc.index[0]
-            overview_insights.append(f"Most common category in {cat} is '{top_cat}' ({int(vc.iloc[0])} rows).")
-
-    if metric_cols:
-        ranges: dict[str, float] = {}
-        for col in metric_cols:
-            series = numeric_series_map.get(col, pd.Series(dtype=float)).dropna()
-            if series.empty:
-                continue
-            ranges[col] = float(series.max() - series.min())
-        if ranges:
-            top_metric = max(ranges, key=ranges.get)
-            overview_insights.append(f"Most volatile metric is {top_metric} (range {ranges[top_metric]:.2f}).")
-
-    overview_charts_html: list[str] = []
-
-    def _style_and_render(fig) -> None:
-        fig.update_layout(
-            margin=dict(l=40, r=20, t=60, b=40),
-            title_x=0.0,
-            font=dict(size=14)
-        )
-        overview_charts_html.append(to_html(fig, full_html=False, include_plotlyjs=False))
-
-    if primary_time_col and metric_cols:
-        time_df = df.copy()
-        if primary_time_col in year_cols:
-            time_df[primary_time_col] = pd.to_datetime(pd.to_numeric(time_df[primary_time_col], errors='coerce'), format='%Y', errors='coerce', utc=True)
-        else:
-            time_df[primary_time_col] = pd.to_datetime(time_df[primary_time_col], errors='coerce', utc=True)
-        time_df = time_df.dropna(subset=[primary_time_col]).sort_values(primary_time_col)
-        if not time_df.empty:
-            metric_var = {
-                col: numeric_series_map[col].loc[time_df.index].var(skipna=True) if col in numeric_series_map else -np.inf
-                for col in metric_cols
-            }
-            top_metrics = [
-                col for col, _ in sorted(
-                    metric_var.items(),
-                    key=lambda item: (item[1] if pd.notna(item[1]) else -np.inf),
-                    reverse=True,
-                )
-                if pd.notna(metric_var.get(col, np.nan)) and metric_var.get(col, -np.inf) > -np.inf
-            ][:3]
-            for col in top_metrics:
-                if col in numeric_series_map:
-                    time_df[col] = numeric_series_map[col]
-            if top_metrics:
-                fig_line = px.line(
-                    time_df,
-                    x=primary_time_col,
-                    y=top_metrics,
-                    title="Key metrics over time",
-                )
-                _style_and_render(fig_line)
-
-                if category_cols and top_metrics:
-                    cat = category_cols[0]
-                    temp_df = time_df[[primary_time_col, cat] + top_metrics].dropna(subset=[cat])
-                    if not temp_df.empty:
-                        melt_df = temp_df.melt(id_vars=[primary_time_col, cat], value_vars=top_metrics, var_name="Metric", value_name="Value")
-                        grouped = melt_df.groupby([cat, "Metric"])["Value"].mean().reset_index()
-                        if not grouped.empty:
-                            fig_cat = px.bar(
-                                grouped,
-                                x=cat,
-                                y="Value",
-                                color="Metric",
-                                title="Average metrics by category",
-                            )
-                            _style_and_render(fig_cat)
-    elif metric_cols and category_cols:
-        metric = metric_cols[0]
-        cat = category_cols[0]
-        temp_df = df[[cat]].copy()
-        temp_df[metric] = numeric_series_map[metric]
-        grouped = temp_df.groupby(cat)[metric].mean(numeric_only=True).reset_index()
-        if not grouped.empty:
-            fig_bar = px.bar(grouped, x=cat, y=metric, title=f"Average {metric} by {cat}")
-            _style_and_render(fig_bar)
-        counts = df[cat].value_counts().reset_index()
-        counts.columns = [cat, 'Count']
-        if not counts.empty:
-            fig_count = px.bar(counts, x=cat, y='Count', title=f"Count by {cat}")
-            _style_and_render(fig_count)
-    elif category_cols:
-        cat = category_cols[0]
-        counts = df[cat].value_counts().reset_index()
-        counts.columns = [cat, 'Count']
-        if not counts.empty:
-            fig_cat = px.bar(counts, x=cat, y='Count', title=f"Count by {cat}")
-            _style_and_render(fig_cat)
-
-    if not overview_charts_html and metric_cols:
-        fallback_metric = metric_cols[0]
-        series = numeric_series_map[fallback_metric].dropna()
-        if not series.empty:
-            fig_fallback = px.histogram(series, x=series, nbins=30, title=f"Distribution of {fallback_metric}")
-            _style_and_render(fig_fallback)
-
-    return dataset_summary, overview_insights, overview_charts_html
 
 
 def _load_dataframe(data_path: Path, max_rows: int = 150_000) -> pd.DataFrame:
@@ -871,9 +703,6 @@ def dashboard():
     summary = None
     dataset_synopsis = None
     suggestions = None
-    dataset_summary: dict = {}
-    overview_insights: list[str] = []
-    overview_charts_html: list[str] = []
     chart_html: str | None = None
     generated_chart_html: str | None = None
     generated_figure_json: str | None = None
@@ -898,7 +727,6 @@ def dashboard():
         if filepath.exists():
             try:
                 df = _load_dataframe(filepath)
-                dataset_summary, overview_insights, overview_charts_html = build_tableau_overview(df)
                 analysis_df = _analysis_subset(df)
                 table_html, columns = _render_preview_table(df)
                 summary = _summarise_dataframe(analysis_df)
@@ -929,9 +757,6 @@ def dashboard():
         suggestions=suggestions,
         quality_signals=quality_signals,
         extra_insights=extra_insights,
-        dataset_summary=dataset_summary,
-        overview_insights=overview_insights,
-        overview_charts_html=overview_charts_html,
         chart=chart_html,
         generated_chart_html=generated_chart_html,
         generated_figure_json=generated_figure_json,
@@ -963,9 +788,6 @@ def upload():
     safe_name: str
     stored_name: str
     filepath: Path
-    dataset_summary: dict = {}
-    overview_insights: list[str] = []
-    overview_charts_html: list[str] = []
     chart_html: str | None = None
     try:
         _validate_upload_file(file)
@@ -992,7 +814,6 @@ def upload():
     db.session.add(new_upload)
 
     try:
-        dataset_summary, overview_insights, overview_charts_html = build_tableau_overview(df)
         analysis_df = _analysis_subset(df)
         summary = _summarise_dataframe(analysis_df)
         suggestions = generate_chart_suggestions(analysis_df)
@@ -1032,9 +853,6 @@ def upload():
         suggestions=suggestions,
         quality_signals=_data_quality_signals(analysis_df),
         extra_insights=_generate_additional_insights(analysis_df),
-        dataset_summary=dataset_summary,
-        overview_insights=overview_insights,
-        overview_charts_html=overview_charts_html,
         chart=display_chart_html,
         generated_chart_html=display_chart_html,
         generated_figure_json=display_figure_json,
@@ -1058,12 +876,6 @@ def visualize():
     x_column = request.form.get('x_column')
     y_column = request.form.get('y_column', '')
     chart_type = request.form.get('chart_type')
-    filter_column = request.form.get('filter_column')
-    filter_value = request.form.get('filter_value')
-    sample_fraction = request.form.get('sample_fraction')
-    dataset_summary: dict = {}
-    overview_insights: list[str] = []
-    overview_charts_html: list[str] = []
     generated_chart_html: str | None = None
     generated_figure_json: str | None = None
     generated_x_column: str | None = None
@@ -1085,20 +897,6 @@ def visualize():
 
     try:
         df = _load_dataframe(filepath)
-
-        sample_fraction_value: float | None = None
-
-        if filter_column and filter_column in df.columns and filter_value:
-            mask = df[filter_column].astype(str).str.contains(re.escape(filter_value), case=False, na=False)
-            df = df[mask]
-        if sample_fraction:
-            try:
-                frac = float(sample_fraction)
-                if 0 < frac < 1:
-                    df = df.sample(frac=frac, random_state=42)
-                    sample_fraction_value = frac
-            except ValueError:
-                flash('Invalid sample fraction; ignoring.')
 
         # Chart rendering logic
         if chart_type == 'pie':
@@ -1164,7 +962,6 @@ def visualize():
         figure_json = json.dumps(fig, cls=PlotlyJSONEncoder)
 
         # Update suggestions, preview, summary
-        dataset_summary, overview_insights, overview_charts_html = build_tableau_overview(df)
         analysis_df = _analysis_subset(df)
         (
             generated_chart_html,
@@ -1200,9 +997,6 @@ def visualize():
             suggestions=suggestions,
             quality_signals=_data_quality_signals(analysis_df),
             extra_insights=_generate_additional_insights(analysis_df),
-            dataset_summary=dataset_summary,
-            overview_insights=overview_insights,
-            overview_charts_html=overview_charts_html,
             generated_chart_html=generated_chart_html,
             generated_figure_json=generated_figure_json,
             generated_x_column=generated_x_column,

@@ -94,41 +94,6 @@
       </div>
     {% endif %}
 
-    {% if dataset_summary %}
-      <div class="card mt-3 mb-4">
-        <div class="card-header">
-          Overview
-        </div>
-        <div class="card-body">
-          <p class="mb-1">
-            Rows: {{ dataset_summary.row_count }}, Columns: {{ dataset_summary.col_count }}
-          </p>
-          <p class="mb-1">
-            Numeric: {{ dataset_summary.num_numeric }}, Datetime: {{ dataset_summary.num_datetime }}, Categorical: {{ dataset_summary.num_categorical }}
-          </p>
-          {% if dataset_summary.primary_time_col %}
-            <p class="mb-3">
-              Time column: {{ dataset_summary.primary_time_col }}, Range: {{ dataset_summary.time_start }} to {{ dataset_summary.time_end }}
-            </p>
-          {% endif %}
-
-          {% if overview_insights %}
-            <ul class="mb-3">
-              {% for line in overview_insights %}
-                <li>{{ line }}</li>
-              {% endfor %}
-            </ul>
-          {% endif %}
-
-          {% for chart_html in overview_charts_html %}
-            <div class="mb-4">
-              {{ chart_html|safe }}
-            </div>
-          {% endfor %}
-        </div>
-      </div>
-    {% endif %}
-
     <!-- CSV Preview -->
     {% if table %}
       <div class="accordion mt-4" id="previewAccordion">
@@ -274,25 +239,6 @@
                       <option value="scatter_map">Map (Scatter)</option>
                       <option value="density_map">Map (Heatmap)</option>
                     </select>
-                  </div>
-                </div>
-                <div class="row mb-3">
-                  <div class="col-md-4">
-                    <label class="form-label">Filter column (optional)</label>
-                    <select name="filter_column" class="form-select">
-                      <option value="">-- none --</option>
-                      {% for col in columns %}
-                        <option value="{{ col }}">{{ col }}</option>
-                      {% endfor %}
-                    </select>
-                  </div>
-                  <div class="col-md-4">
-                    <label class="form-label">Filter contains</label>
-                    <input type="text" name="filter_value" class="form-control" placeholder="e.g. region name">
-                  </div>
-                  <div class="col-md-4">
-                    <label class="form-label">Sample fraction (0-1)</label>
-                    <input type="number" step="0.05" min="0.05" max="0.95" name="sample_fraction" class="form-control" placeholder="0.25">
                   </div>
                 </div>
                 <button type="submit" class="btn btn-success">Generate Chart</button>
