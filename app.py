@@ -117,6 +117,7 @@ def _validate_upload_file(file) -> None:
 
 
 def _enforce_dataframe_limits(df: pd.DataFrame, max_rows: int = 150_000, max_cols: int = 150) -> pd.DataFrame:
+    """Keep uploads bounded so processing stays responsive."""
     if df.shape[1] > max_cols:
         raise ValueError(f"CSV has too many columns ({df.shape[1]}). Please upload a file with <= {max_cols} columns.")
     if df.shape[0] > max_rows:
@@ -125,6 +126,7 @@ def _enforce_dataframe_limits(df: pd.DataFrame, max_rows: int = 150_000, max_col
 
 
 def _ensure_unique_columns(columns) -> list[str]:
+    """Ensure column names are unique by suffixing duplicates."""
     seen: dict[str, int] = {}
     unique_cols: list[str] = []
     for col in columns:
@@ -286,6 +288,7 @@ def _numeric_series_map(df: pd.DataFrame) -> dict[str, pd.Series]:
 
 
 def _select_primary_numeric(numeric_series_map: dict[str, pd.Series]) -> str | None:
+    """Pick the numeric column with the highest variance."""
     if not numeric_series_map:
         return None
     variances = {col: series.var(skipna=True) for col, series in numeric_series_map.items()}
@@ -420,6 +423,7 @@ def _generate_smart_insights(df: pd.DataFrame) -> list[str]:
 
 
 def _data_quality_signals(df: pd.DataFrame) -> dict[str, str]:
+    """Summarize quick quality flags like duplicates and outliers."""
     signals: dict[str, str] = {}
     duplicate_rows = int(df.duplicated().sum())
     if duplicate_rows:
@@ -440,6 +444,7 @@ def _data_quality_signals(df: pd.DataFrame) -> dict[str, str]:
 
 
 def _generate_additional_insights(df: pd.DataFrame) -> dict[str, str]:
+    """Provide lightweight dataset stats for context."""
     insights: dict[str, str] = {}
     dtypes = df.dtypes.apply(lambda x: str(x)).value_counts()
     insights['dataset shape'] = f"{len(df):,} rows × {df.shape[1]} columns"
@@ -495,6 +500,7 @@ def _dataset_brief(df: pd.DataFrame) -> str:
 
 
 def _render_preview_table(df: pd.DataFrame) -> tuple[str, list[str]]:
+    """Render a small HTML preview and return its columns."""
     preview_df = df.head(100)
     table_html = preview_df.to_html(classes='table table-striped table-bordered', index=False)
     columns = df.columns.tolist()
