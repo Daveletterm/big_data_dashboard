@@ -72,11 +72,14 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
 
+# ------------- Rate limiting and request context helpers -------------
 def _client_ip() -> str:
+    """Best-effort client IP from headers or remote address."""
     return request.headers.get('X-Forwarded-For', request.remote_addr or 'unknown')
 
 
 def _enforce_rate_limit(key: str) -> None:
+    """Simple sliding-window rate limiter per key."""
     now = datetime.utcnow()
     window_start = now - RATE_LIMIT_WINDOW
     entries = [ts for ts in _rate_limits[key] if ts > window_start]
@@ -86,13 +89,16 @@ def _enforce_rate_limit(key: str) -> None:
         abort(429, description="Too many requests; please slow down.")
 
 
+# ------------- File and upload utilities -------------
 def _user_upload_dir(user_id: int) -> Path:
+    """Return (and ensure) the per-user upload directory."""
     path = UPLOAD_BASE / f"user_{user_id}"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
 def _validate_upload_file(file) -> None:
+    """Reject non-CSV uploads early."""
     allowed_mimes = {
         'text/csv',
         'application/csv',
@@ -132,6 +138,7 @@ def _ensure_unique_columns(columns) -> list[str]:
     return unique_cols
 
 
+# ------------- Dataframe shaping and coercion utilities -------------
 def _coerce_datetime_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Coerce obvious datetime columns into datetime64 with safeguards."""
 
@@ -173,6 +180,7 @@ def _analysis_subset(df: pd.DataFrame, max_rows: int = 20_000) -> pd.DataFrame:
     return df.sample(n=max_rows, random_state=42)
 
 
+# ------------- Insight and suggestion helpers -------------
 def infer_column_roles(df: pd.DataFrame) -> dict:
     """
     Inspect df and classify columns into semantic roles:
@@ -268,6 +276,7 @@ def _basic_column_types(df: pd.DataFrame, *, max_category_cardinality: int = 50)
 
 
 def _numeric_series_map(df: pd.DataFrame) -> dict[str, pd.Series]:
+    """Map all columns to numeric series where conversion succeeds."""
     numeric_series_map: dict[str, pd.Series] = {}
     for col in df.columns:
         series = pd.to_numeric(df[col], errors='coerce')
@@ -698,9 +707,10 @@ class Upload(db.Model):
 with app.app_context():
     db.create_all()
 
-# Routes
+# ------------- Routes -------------
 @app.route('/')
 def home():
+    """Landing page for unauthenticated visitors."""
     if 'user' in session:
         return redirect(url_for('dashboard'))
     return render_template('index.html')
@@ -714,6 +724,7 @@ def file_exists_filter(filename):
 
 @app.route('/signup', methods=['GET', 'POST'])
 def signup():
+    """Create a new user account."""
     _enforce_rate_limit(f"signup:{_client_ip()}")
     if request.method == 'POST':
         username = request.form['username']
@@ -733,6 +744,7 @@ def signup():
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
+    """Authenticate an existing user."""
     _enforce_rate_limit(f"login:{_client_ip()}")
     if request.method == 'POST':
         username = request.form['username']
@@ -749,12 +761,14 @@ def login():
 
 @app.route('/logout')
 def logout():
+    """Log out the current user and clear session."""
     session.pop('user', None)
     session.pop('user_id', None)
     return redirect(url_for('login'))
 
 @app.route('/dashboard')
 def dashboard():
+    """Main dashboard where authenticated users explore uploads and build charts."""
     if 'user' not in session:
         return redirect(url_for('login'))
 
@@ -838,6 +852,7 @@ def dashboard():
 
 @app.route('/upload', methods=['POST'])
 def upload():
+    """Handle CSV uploads and refresh dashboard context."""
     if 'user' not in session:
         return redirect(url_for('login'))
 
@@ -935,6 +950,7 @@ def upload():
 
 @app.route('/visualize', methods=['POST'])
 def visualize():
+    """Render a chart based on user input selections."""
     if 'user' not in session:
         return redirect(url_for('login'))
 
@@ -1084,6 +1100,7 @@ def visualize():
 
 @app.route('/delete_file', methods=['POST'])
 def delete_file():
+    """Delete a single uploaded file and its database record."""
     if 'user' not in session:
         return redirect(url_for('login'))
 
@@ -1119,6 +1136,7 @@ def delete_file():
 
 @app.route('/delete_all_files', methods=['POST'])
 def delete_all_files():
+    """Delete all uploads for the current user."""
     if 'user' not in session:
         return redirect(url_for('login'))
 

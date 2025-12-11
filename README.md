@@ -1,6 +1,13 @@
 # Big Data Dashboard
 
-A Flask app for uploading CSVs, exploring quick insights, and building Plotly charts. The app expects a few environment variables for security and storage; use a `.env` file so you only set them once.
+A CSV-focused Flask app for uploading data, exploring quick insights, and building interactive Plotly charts. The app expects a few environment variables for security and storage; use a `.env` file so you only set them once.
+
+**Typical flow**
+- Sign up and log in.
+- Upload a CSV.
+- Review the table preview, smart insights, and data quality notes.
+- Use chart suggestions or build a custom chart.
+- Delete uploads when you are done.
 
 ## 1) Local setup
 1. Create and activate a virtual environment:
@@ -69,3 +76,6 @@ A Flask app for uploading CSVs, exploring quick insights, and building Plotly ch
   export DATABASE_URL="postgresql://..."
   export MAPBOX_TOKEN=""
   ```
+
+## Support
+Questions or issues? Contact support@bigdatadashboard.app.
