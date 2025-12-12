@@ -56,7 +56,7 @@ def _determine_database_uri():
 
     if database_url:
         # SQLAlchemy expects the ``postgresql`` scheme. Some providers still
-        # supply ``postgres`` so we normalise it here to avoid runtime errors.
+        # supply ``postgres`` so it's normalized here to avoid runtime errors.
         if database_url.startswith("postgres://"):
             database_url = database_url.replace("postgres://", "postgresql://", 1)
 
@@ -398,7 +398,7 @@ def _generate_smart_insights(df: pd.DataFrame) -> list[str]:
                             f"Recent values for {metric_col} are about {_fmt_pct(abs(change))} {direction} than earlier in the data."
                         )
 
-    # Outliers: simple IQR check on a numeric column.
+    # Outliers: IQR check on a numeric column.
     if numeric_df.shape[1] >= 1:
         for col in numeric_df.columns:
             series = numeric_df[col].dropna()
